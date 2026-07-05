@@ -1,6 +1,8 @@
 use crate::config::constants::*;
 use crate::pow::U256;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 // ─── Algorithm parameters ─────────────────────────────────────────────────────
 
@@ -68,6 +70,77 @@ impl VisionXParams {
 /// constructing a local `VisionXParams`. This guarantees a single definition.
 pub static VISIONX_PARAMS: Lazy<VisionXParams> = Lazy::new(VisionXParams::default);
 
+#[allow(dead_code)]
+type DatasetCache = HashMap<(u64, [u8; 32]), (Arc<Vec<u64>>, usize)>;
+
+#[allow(dead_code)]
+static DATASET_CACHE: Lazy<Mutex<DatasetCache>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[allow(dead_code)]
+struct VisionXDataset {
+    mem: Box<[u64]>,
+    mask: usize,
+}
+
+#[allow(dead_code)]
+impl VisionXDataset {
+    fn build(params: &VisionXParams, prev_hash32: &[u8; 32], epoch: u64) -> Self {
+        let bytes = params.dataset_mb * 1024 * 1024;
+        let mut words = bytes / std::mem::size_of::<u64>();
+        let mut n = 1usize;
+        while n < words {
+            n <<= 1;
+        }
+        words = n;
+
+        let seed = fold_seed(prev_hash32, epoch);
+        let mut sm = SplitMix64::new(seed);
+        let mut mem = vec![0u64; words].into_boxed_slice();
+        for i in 0..words {
+            mem[i] = sm.next();
+        }
+
+        Self {
+            mem,
+            mask: words - 1,
+        }
+    }
+
+    fn get_cached(
+        params: &VisionXParams,
+        prev_hash32: &[u8; 32],
+        epoch: u64,
+    ) -> (Arc<Vec<u64>>, usize) {
+        let key = (epoch, *prev_hash32);
+
+        {
+            let cache = DATASET_CACHE.lock().unwrap();
+            if let Some((dataset, mask)) = cache.get(&key) {
+                return (Arc::clone(dataset), *mask);
+            }
+        }
+
+        let ds = Self::build(params, prev_hash32, epoch);
+        let dataset_arc = Arc::new(ds.mem.to_vec());
+        let mask = ds.mask;
+
+        {
+            let mut cache = DATASET_CACHE.lock().unwrap();
+            cache.insert(key, (Arc::clone(&dataset_arc), mask));
+            if cache.len() > 3 {
+                if let Some(oldest_key) = cache.keys().next().copied() {
+                    cache.remove(&oldest_key);
+                }
+            }
+        }
+
+        (dataset_arc, mask)
+    }
+
+    fn clear_cache() {
+        DATASET_CACHE.lock().unwrap().clear();
+    }
+}
 // --- Internal helpers ----------------------------------------------------
 
 #[allow(dead_code)]
@@ -375,6 +448,86 @@ mod tests {
         assert_eq!(mask_a & (mask_a + 1), 0);
         assert_eq!(mask_a, mask_c);
         assert_eq!(scratch_a.len() & mask_a, 0);
+    }
+    #[test]
+    fn dataset_build_small_is_deterministic() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let prev = [0x11u8; 32];
+        let a = VisionXDataset::build(&params, &prev, 7);
+        let b = VisionXDataset::build(&params, &prev, 7);
+
+        assert_eq!(a.mem, b.mem);
+        assert_eq!(a.mask, b.mask);
+        assert!(a.mem.len() > 0);
+        assert_eq!(a.mem.len() & a.mask, 0);
+    }
+
+    #[test]
+    fn dataset_build_small_changes_with_epoch_and_prev_hash() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let prev_a = [0x11u8; 32];
+        let prev_b = [0x22u8; 32];
+        let a = VisionXDataset::build(&params, &prev_a, 7);
+        let b = VisionXDataset::build(&params, &prev_a, 8);
+        let c = VisionXDataset::build(&params, &prev_b, 7);
+
+        assert_ne!(a.mem, b.mem);
+        assert_ne!(a.mem, c.mem);
+        assert_eq!(a.mask, b.mask);
+        assert_eq!(a.mask, c.mask);
+    }
+
+    #[test]
+    fn dataset_cache_reuses_small_allocation_for_same_key() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let prev = [0x33u8; 32];
+        VisionXDataset::clear_cache();
+        let (a, mask_a) = VisionXDataset::get_cached(&params, &prev, 3);
+        let (b, mask_b) = VisionXDataset::get_cached(&params, &prev, 3);
+
+        assert_eq!(mask_a, mask_b);
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn dataset_cache_distinguishes_epoch_and_prev_hash() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let prev = [0x44u8; 32];
+        VisionXDataset::clear_cache();
+        let (a, _) = VisionXDataset::get_cached(&params, &prev, 3);
+        let (b, _) = VisionXDataset::get_cached(&params, &prev, 4);
+        let (c, _) = VisionXDataset::get_cached(&params, &[0x55u8; 32], 3);
+
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &c));
     }
 }
 
