@@ -1,4 +1,5 @@
 use crate::config::constants::*;
+use crate::pow::U256;
 use once_cell::sync::Lazy;
 
 // ─── Algorithm parameters ─────────────────────────────────────────────────────
@@ -66,6 +67,101 @@ impl VisionXParams {
 /// All code that needs algorithm parameters should reference this rather than
 /// constructing a local `VisionXParams`. This guarantees a single definition.
 pub static VISIONX_PARAMS: Lazy<VisionXParams> = Lazy::new(VisionXParams::default);
+
+// --- Internal helpers ----------------------------------------------------
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct SplitMix64 {
+    state: u64,
+}
+
+#[allow(dead_code)]
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    #[inline]
+    fn next(&mut self) -> u64 {
+        let mut z = {
+            self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+            self.state
+        };
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+}
+
+#[allow(dead_code)]
+#[inline]
+fn expand_256(mut a: u64, mut b: u64) -> U256 {
+    for _ in 0..4 {
+        a = a.rotate_left(13) ^ b.wrapping_mul(0x9E3779B185EBCA87);
+        b = b.rotate_left(17) ^ a.wrapping_mul(0xC2B2AE3D27D4EB4F);
+    }
+    let mut sm = SplitMix64::new(a ^ b ^ 0xD6E8FEB86659FD93);
+    let c = sm.next();
+    let d = sm.next();
+    let mut out = [0u8; 32];
+    out[..8].copy_from_slice(&a.to_be_bytes());
+    out[8..16].copy_from_slice(&b.to_be_bytes());
+    out[16..24].copy_from_slice(&c.to_be_bytes());
+    out[24..32].copy_from_slice(&d.to_be_bytes());
+    out
+}
+
+#[allow(dead_code)]
+#[inline]
+fn fold_seed(prev_hash32: &[u8; 32], epoch_id: u64) -> u64 {
+    let mut s: u64 = epoch_id ^ 0xA24BAED4963EE407;
+    for chunk in prev_hash32.chunks(8) {
+        let mut v = [0u8; 8];
+        v[..chunk.len()].copy_from_slice(chunk);
+        s ^= u64::from_be_bytes(v).rotate_left(7);
+        s = s.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(9);
+    }
+    s
+}
+
+#[allow(dead_code)]
+fn init_scratch(
+    params: &VisionXParams,
+    base: &[u64],
+    base_mask: usize,
+    header: &[u8],
+    nonce: u64,
+) -> (Vec<u64>, usize) {
+    let bytes = params.scratch_mb * 1024 * 1024;
+    let mut words = bytes / std::mem::size_of::<u64>();
+    let mut n = 1usize;
+    while n < words {
+        n <<= 1;
+    }
+    words = n;
+    let smask = words - 1;
+
+    let mut seed: u64 = nonce ^ 0xDEADBEEFF00DFACE;
+    for chunk in header.chunks(8) {
+        let mut v = [0u8; 8];
+        v[..chunk.len()].copy_from_slice(chunk);
+        seed ^= u64::from_be_bytes(v).rotate_left(13);
+        seed = seed.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(7);
+    }
+
+    let mut scratch = vec![0u64; words];
+    let mut sm = SplitMix64::new(seed);
+
+    for i in 0..words {
+        let mix_seed = sm.next();
+        let idx1 = (mix_seed.rotate_left(17) as usize) & base_mask;
+        let idx2 = (mix_seed.rotate_right(23) as usize) & base_mask;
+        scratch[i] = base[idx1] ^ base[idx2] ^ mix_seed.wrapping_mul(0xC2B2AE3D27D4EB4F);
+    }
+
+    (scratch, smask)
+}
 
 // ─── Hash function (stub) ─────────────────────────────────────────────────────
 
@@ -212,4 +308,73 @@ mod tests {
         assert_eq!(h.len(), 64);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
+    #[test]
+    fn splitmix64_sequence_is_deterministic() {
+        let mut a = SplitMix64::new(0x1234_5678_9ABC_DEF0);
+        let mut b = SplitMix64::new(0x1234_5678_9ABC_DEF0);
+
+        let a1 = a.next();
+        let b1 = b.next();
+        let a2 = a.next();
+        let b2 = b.next();
+
+        assert_eq!(a1, b1);
+        assert_eq!(a2, b2);
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn fold_seed_is_deterministic_and_sensitive() {
+        let prev = [0x11u8; 32];
+        let same_a = fold_seed(&prev, 7);
+        let same_b = fold_seed(&prev, 7);
+        let diff_epoch = fold_seed(&prev, 8);
+        let diff_prev = fold_seed(&[0x22u8; 32], 7);
+
+        assert_eq!(same_a, same_b);
+        assert_ne!(same_a, diff_epoch);
+        assert_ne!(same_a, diff_prev);
+    }
+
+    #[test]
+    fn expand_256_is_deterministic_and_32_bytes() {
+        let a = expand_256(0x0123_4567_89AB_CDEF, 0x0FED_CBA9_8765_4321);
+        let b = expand_256(0x0123_4567_89AB_CDEF, 0x0FED_CBA9_8765_4321);
+        let c = expand_256(0x0123_4567_89AB_CDEF, 0x0FED_CBA9_8765_4322);
+
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn init_scratch_is_deterministic_with_small_params() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let base = vec![
+            0x1111_2222_3333_4444,
+            0x5555_6666_7777_8888,
+            0x9999_AAAA_BBBB_CCCC,
+            0xDDDD_EEEE_FFFF_0000,
+        ];
+        let header = b"small-test-header";
+
+        let (scratch_a, mask_a) = init_scratch(&params, &base, base.len() - 1, header, 42);
+        let (scratch_b, mask_b) = init_scratch(&params, &base, base.len() - 1, header, 42);
+        let (scratch_c, mask_c) = init_scratch(&params, &base, base.len() - 1, header, 43);
+
+        assert_eq!(scratch_a, scratch_b);
+        assert_eq!(mask_a, mask_b);
+        assert_ne!(scratch_a, scratch_c);
+        assert_eq!(mask_a & (mask_a + 1), 0);
+        assert_eq!(mask_a, mask_c);
+        assert_eq!(scratch_a.len() & mask_a, 0);
+    }
 }
+
