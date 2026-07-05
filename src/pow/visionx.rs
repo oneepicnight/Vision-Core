@@ -337,6 +337,53 @@ fn visionx_hash(
     expand_256(a ^ acc, b ^ acc.rotate_left(3))
 }
 
+fn nonce_from_header(header_with_nonce: &[u8], nonce_offset: usize) -> Option<u64> {
+    let end = nonce_offset.checked_add(8)?;
+    let nonce_bytes = header_with_nonce.get(nonce_offset..end)?;
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(nonce_bytes);
+    Some(u64::from_be_bytes(raw))
+}
+
+fn meets_target(hash: &U256, target: &U256) -> bool {
+    &hash[0..8] <= &target[0..8]
+}
+
+/// Verify a historical VisionX candidate.
+///
+/// Returns `false` on malformed nonce offsets, undersized buffers, or hashes
+/// that do not satisfy the target. The comparison follows the historical
+/// upper-64-bit rule only.
+pub fn verify(
+    params: &VisionXParams,
+    prev_hash32: &[u8; 32],
+    epoch: u64,
+    header_with_nonce: &[u8],
+    nonce_offset: usize,
+    target: &U256,
+) -> bool {
+    if params.dataset_mb > 512 {
+        return false;
+    }
+    if params.scratch_mb > 128 {
+        return false;
+    }
+    if params.mix_iters > 1_000_000 {
+        return false;
+    }
+    if params.reads_per_iter > 8 {
+        return false;
+    }
+
+    let Some(nonce) = nonce_from_header(header_with_nonce, nonce_offset) else {
+        return false;
+    };
+
+    let (dataset, mask) = VisionXDataset::get_cached(params, prev_hash32, epoch);
+    let digest = visionx_hash(params, dataset.as_slice(), mask, header_with_nonce, nonce);
+    meets_target(&digest, target)
+}
+
 /// Return the hex-encoded VisionX hash for a given header and nonce.
 ///
 /// Convenience wrapper around `compute_visionx_hash` using the canonical
@@ -597,7 +644,6 @@ mod tests {
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
     }
-
     #[test]
     fn visionx_hash_small_params_is_deterministic() {
         let params = VisionXParams {
@@ -654,5 +700,81 @@ mod tests {
 
         assert_ne!(h1, h2);
     }
-}
 
+    #[test]
+    fn visionx_verify_accepts_valid_candidate() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let epoch = 9;
+        let nonce_offset = 8usize;
+        let mut header = vec![0x11u8; 24];
+        header[nonce_offset..nonce_offset + 8].copy_from_slice(&0xA5A5_A5A5_A5A5_A5A5u64.to_be_bytes());
+        let target = [0xFFu8; 32];
+
+        assert!(verify(&params, &prev, epoch, &header, nonce_offset, &target));
+    }
+
+    #[test]
+    fn visionx_verify_rejects_invalid_nonce_offset() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let epoch = 9;
+        let header = vec![0x11u8; 16];
+        let target = [0xFFu8; 32];
+
+        assert!(!verify(&params, &prev, epoch, &header, 20, &target));
+    }
+
+    #[test]
+    fn visionx_verify_rejects_undersized_buffers() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let epoch = 9;
+        let header = vec![0x11u8; 7];
+        let target = [0xFFu8; 32];
+
+        assert!(!verify(&params, &prev, epoch, &header, 0, &target));
+    }
+
+    #[test]
+    fn visionx_verify_ignores_lower_target_bytes() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let epoch = 9;
+        let nonce_offset = 8usize;
+        let mut header = vec![0x11u8; 24];
+        header[nonce_offset..nonce_offset + 8].copy_from_slice(&0xA5A5_A5A5_A5A5_A5A5u64.to_be_bytes());
+        let mut target = [0xFFu8; 32];
+        target[8..].fill(0x00);
+
+        assert!(verify(&params, &prev, epoch, &header, nonce_offset, &target));
+    }
+}
