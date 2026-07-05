@@ -266,6 +266,77 @@ pub fn compute_visionx_hash(
     *blake3::hash(&input).as_bytes()
 }
 
+#[allow(dead_code)]
+fn visionx_hash(
+    params: &VisionXParams,
+    base: &[u64],
+    base_mask: usize,
+    header: &[u8],
+    nonce: u64,
+) -> U256 {
+    let (mut scratch, smask) = init_scratch(params, base, base_mask, header, nonce);
+
+    let mut a: u64 = 0x243F_6A88_85A3_08D3 ^ nonce.rotate_left(17);
+    let mut b: u64 = 0x1319_8A2E_0370_7344 ^ nonce.rotate_right(11);
+
+    for chunk in header.chunks(16) {
+        let mut p = [0u8; 16];
+        p[..chunk.len()].copy_from_slice(chunk);
+        let mut x_bytes = [0u8; 8];
+        let mut y_bytes = [0u8; 8];
+        x_bytes.copy_from_slice(&p[0..8]);
+        y_bytes.copy_from_slice(&p[8..16]);
+        let x = u64::from_be_bytes(x_bytes);
+        let y = u64::from_be_bytes(y_bytes);
+        a ^= x.wrapping_mul(0x9E37_79B1_85EB_CA87);
+        b ^= y.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        a = a.rotate_left(13) ^ b.rotate_right(7);
+        b = b.rotate_left(29) ^ a.rotate_right(19);
+    }
+
+    let its = params.mix_iters;
+    let mut acc = a ^ b ^ 0xDEAD_BEEF_F00D_FACEu64;
+    let writes = params.write_every;
+
+    for i in 0..its {
+        let j1 = (a ^ b ^ acc ^ (i as u64).wrapping_mul(0x9E3779B9)).rotate_left(17) as usize & smask;
+        let v1 = scratch[j1];
+
+        let j2 = (v1 ^ a ^ acc).rotate_left(23) as usize & smask;
+        let v2 = scratch[j2];
+
+        let j3 = (v2 ^ b ^ acc).rotate_left(19) as usize & smask;
+        let v3 = scratch[j3];
+
+        let v4 = if params.reads_per_iter >= 4 {
+            let j4 = (v3 ^ v1 ^ acc).rotate_left(29) as usize & smask;
+            scratch[j4]
+        } else {
+            v3
+        };
+
+        let mix = v1
+            ^ v2.rotate_left(13)
+            ^ v3.wrapping_mul(0x94D0_49BB_1331_11EB)
+            ^ v4.rotate_right(7);
+
+        a = a.rotate_left(13) ^ mix.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        b = b.rotate_left(17) ^ (mix ^ acc).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        acc = acc.rotate_left(7) ^ (a ^ b).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+
+        if writes > 0 && (i % writes) == 0 {
+            let jw = (mix ^ a ^ b.rotate_left(11) ^ (i as u64).wrapping_mul(0xA24B_AED4_963E_E407))
+                .rotate_left(31) as usize
+                & smask;
+            scratch[jw] = scratch[jw]
+                .wrapping_add(mix ^ 0x9E37_79B9_7F4A_7C15)
+                .rotate_left(41);
+        }
+    }
+
+    expand_256(a ^ acc, b ^ acc.rotate_left(3))
+}
+
 /// Return the hex-encoded VisionX hash for a given header and nonce.
 ///
 /// Convenience wrapper around `compute_visionx_hash` using the canonical
@@ -273,9 +344,6 @@ pub fn compute_visionx_hash(
 pub fn visionx_hash_hex(header_bytes: &[u8], nonce: u64) -> String {
     hex::encode(compute_visionx_hash(header_bytes, nonce, &VISIONX_PARAMS))
 }
-
-// ─── Unit tests ───────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +596,63 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
+    }
+
+    #[test]
+    fn visionx_hash_small_params_is_deterministic() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let dataset = VisionXDataset::build(&params, &prev, 9);
+        let header = b"visionx-small-test";
+        let h1 = visionx_hash(&params, &dataset.mem, dataset.mask, header, 0xA5A5_A5A5_A5A5_A5A5);
+        let h2 = visionx_hash(&params, &dataset.mem, dataset.mask, header, 0xA5A5_A5A5_A5A5_A5A5);
+
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn visionx_hash_changes_with_nonce() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let dataset = VisionXDataset::build(&params, &prev, 9);
+        let header = b"visionx-small-test";
+        let h1 = visionx_hash(&params, &dataset.mem, dataset.mask, header, 1);
+        let h2 = visionx_hash(&params, &dataset.mem, dataset.mask, header, 2);
+
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn visionx_hash_changes_with_header() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 32,
+            reads_per_iter: 4,
+            write_every: 4,
+            epoch_blocks: 32,
+        };
+        let prev = [0x66u8; 32];
+        let dataset = VisionXDataset::build(&params, &prev, 9);
+        let h1 = visionx_hash(&params, &dataset.mem, dataset.mask, b"header-a", 1);
+        let h2 = visionx_hash(&params, &dataset.mem, dataset.mask, b"header-b", 1);
+
+        assert_ne!(h1, h2);
     }
 }
 
