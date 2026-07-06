@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod orphan;
+mod state_root;
 pub mod reorg;
 pub mod snapshots;
 pub mod state;
