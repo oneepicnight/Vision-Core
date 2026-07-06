@@ -1,7 +1,8 @@
-﻿use crate::types::BlockHeader;
+use crate::types::BlockHeader;
 
 const VPOW_MAGIC: &[u8; 4] = b"VPOW";
 const VPOW_VERSION: u32 = 1;
+pub const HISTORICAL_VPOW_NONCE_OFFSET: usize = 64;
 
 fn decode_hash_32(label: &str, s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);

@@ -32,12 +32,12 @@ pub struct VisionXParams {
 impl Default for VisionXParams {
     fn default() -> Self {
         Self {
-            dataset_mb:    VISIONX_DATASET_MB,
-            scratch_mb:    VISIONX_SCRATCH_MB,
-            mix_iters:     VISIONX_MIX_ITERS,
+            dataset_mb: VISIONX_DATASET_MB,
+            scratch_mb: VISIONX_SCRATCH_MB,
+            mix_iters: VISIONX_MIX_ITERS,
             reads_per_iter: VISIONX_READS_PER_ITER,
-            write_every:   VISIONX_WRITE_EVERY,
-            epoch_blocks:  VISIONX_EPOCH_BLOCKS,
+            write_every: VISIONX_WRITE_EVERY,
+            epoch_blocks: VISIONX_EPOCH_BLOCKS,
         }
     }
 }
@@ -51,8 +51,12 @@ impl VisionXParams {
         let canonical = format!(
             "visionx/v1 dataset_mb={} scratch_mb={} mix_iters={} \
              reads_per_iter={} write_every={} epoch_blocks={}",
-            self.dataset_mb, self.scratch_mb, self.mix_iters,
-            self.reads_per_iter, self.write_every, self.epoch_blocks
+            self.dataset_mb,
+            self.scratch_mb,
+            self.mix_iters,
+            self.reads_per_iter,
+            self.write_every,
+            self.epoch_blocks
         );
         hex::encode(blake3::hash(canonical.as_bytes()).as_bytes())
     }
@@ -256,11 +260,7 @@ fn init_scratch(
 ///
 /// # Returns
 /// 32-byte hash value. A block is valid when this value â‰¤ `difficulty_to_target(difficulty)`.
-pub fn compute_visionx_hash(
-    header_bytes: &[u8],
-    nonce: u64,
-    _params: &VisionXParams,
-) -> [u8; 32] {
+pub fn compute_visionx_hash(header_bytes: &[u8], nonce: u64, _params: &VisionXParams) -> [u8; 32] {
     // STUB: blake3(header_bytes ++ nonce_le) â€” replace with VisionX DAG algorithm.
     let mut input = Vec::with_capacity(header_bytes.len() + 8);
     input.extend_from_slice(header_bytes);
@@ -301,7 +301,8 @@ fn visionx_hash(
     let writes = params.write_every;
 
     for i in 0..its {
-        let j1 = (a ^ b ^ acc ^ (i as u64).wrapping_mul(0x9E3779B9)).rotate_left(17) as usize & smask;
+        let j1 =
+            (a ^ b ^ acc ^ (i as u64).wrapping_mul(0x9E3779B9)).rotate_left(17) as usize & smask;
         let v1 = scratch[j1];
 
         let j2 = (v1 ^ a ^ acc).rotate_left(23) as usize & smask;
@@ -317,10 +318,8 @@ fn visionx_hash(
             v3
         };
 
-        let mix = v1
-            ^ v2.rotate_left(13)
-            ^ v3.wrapping_mul(0x94D0_49BB_1331_11EB)
-            ^ v4.rotate_right(7);
+        let mix =
+            v1 ^ v2.rotate_left(13) ^ v3.wrapping_mul(0x94D0_49BB_1331_11EB) ^ v4.rotate_right(7);
 
         a = a.rotate_left(13) ^ mix.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
         b = b.rotate_left(17) ^ (mix ^ acc).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -362,11 +361,35 @@ fn decode_hash_32(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).map_err(|e| format!("parent_hash: invalid hex: {e}"))?;
     if bytes.len() != 32 {
-        return Err(format!("parent_hash: expected 32 bytes, got {}", bytes.len()));
+        return Err(format!(
+            "parent_hash: expected 32 bytes, got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+pub(crate) fn visionx_digest(
+    params: &VisionXParams,
+    prev_hash32: &[u8; 32],
+    epoch: u64,
+    header_bytes: &[u8],
+    nonce: u64,
+) -> Result<U256, String> {
+    if !params_within_bounds(params) {
+        return Err("invalid VisionX parameters".into());
+    }
+
+    let (dataset, mask) = VisionXDataset::get_cached(params, prev_hash32, epoch);
+    Ok(visionx_hash(
+        params,
+        dataset.as_slice(),
+        mask,
+        header_bytes,
+        nonce,
+    ))
 }
 
 /// Compute the historical VisionX digest for a block header.
@@ -378,20 +401,15 @@ pub(crate) fn historical_block_digest(
     epoch: u64,
     header: &BlockHeader,
 ) -> Result<U256, String> {
-    if !params_within_bounds(params) {
-        return Err("invalid VisionX parameters".into());
-    }
-
     let prev_hash32 = decode_hash_32(&header.parent_hash)?;
     let historical_preimage = historical_vpow_message_bytes_with_nonce_zero(header)?;
-    let (dataset, mask) = VisionXDataset::get_cached(params, &prev_hash32, epoch);
-    Ok(visionx_hash(
+    visionx_digest(
         params,
-        dataset.as_slice(),
-        mask,
+        &prev_hash32,
+        epoch,
         historical_preimage.as_slice(),
         header.nonce,
-    ))
+    )
 }
 
 /// Verify a historical VisionX candidate.
@@ -436,12 +454,12 @@ mod tests {
     #[test]
     fn params_default_matches_constants() {
         let p = VisionXParams::default();
-        assert_eq!(p.dataset_mb,    VISIONX_DATASET_MB);
-        assert_eq!(p.scratch_mb,    VISIONX_SCRATCH_MB);
-        assert_eq!(p.mix_iters,     VISIONX_MIX_ITERS);
+        assert_eq!(p.dataset_mb, VISIONX_DATASET_MB);
+        assert_eq!(p.scratch_mb, VISIONX_SCRATCH_MB);
+        assert_eq!(p.mix_iters, VISIONX_MIX_ITERS);
         assert_eq!(p.reads_per_iter, VISIONX_READS_PER_ITER);
-        assert_eq!(p.write_every,   VISIONX_WRITE_EVERY);
-        assert_eq!(p.epoch_blocks,  VISIONX_EPOCH_BLOCKS);
+        assert_eq!(p.write_every, VISIONX_WRITE_EVERY);
+        assert_eq!(p.epoch_blocks, VISIONX_EPOCH_BLOCKS);
     }
 
     #[test]
@@ -469,8 +487,11 @@ mod tests {
         let p1 = VisionXParams::default();
         let mut p2 = p1;
         p2.mix_iters += 1;
-        assert_ne!(p1.fingerprint(), p2.fingerprint(),
-            "changing any param must change the fingerprint");
+        assert_ne!(
+            p1.fingerprint(),
+            p2.fingerprint(),
+            "changing any param must change the fingerprint"
+        );
     }
 
     // â”€â”€ epoch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -484,7 +505,7 @@ mod tests {
     fn epoch_increments_at_boundary() {
         let ep = VISIONX_EPOCH_BLOCKS as u64;
         assert_eq!(VISIONX_PARAMS.epoch(ep - 1), 0);
-        assert_eq!(VISIONX_PARAMS.epoch(ep),     1);
+        assert_eq!(VISIONX_PARAMS.epoch(ep), 1);
         assert_eq!(VISIONX_PARAMS.epoch(ep * 2), 2);
     }
 
@@ -693,8 +714,20 @@ mod tests {
         let prev = [0x66u8; 32];
         let dataset = VisionXDataset::build(&params, &prev, 9);
         let header = b"visionx-small-test";
-        let h1 = visionx_hash(&params, &dataset.mem, dataset.mask, header, 0xA5A5_A5A5_A5A5_A5A5);
-        let h2 = visionx_hash(&params, &dataset.mem, dataset.mask, header, 0xA5A5_A5A5_A5A5_A5A5);
+        let h1 = visionx_hash(
+            &params,
+            &dataset.mem,
+            dataset.mask,
+            header,
+            0xA5A5_A5A5_A5A5_A5A5,
+        );
+        let h2 = visionx_hash(
+            &params,
+            &dataset.mem,
+            dataset.mask,
+            header,
+            0xA5A5_A5A5_A5A5_A5A5,
+        );
 
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 32);
@@ -751,10 +784,18 @@ mod tests {
         let epoch = 9;
         let nonce_offset = 8usize;
         let mut header = vec![0x11u8; 24];
-        header[nonce_offset..nonce_offset + 8].copy_from_slice(&0xA5A5_A5A5_A5A5_A5A5u64.to_be_bytes());
+        header[nonce_offset..nonce_offset + 8]
+            .copy_from_slice(&0xA5A5_A5A5_A5A5_A5A5u64.to_be_bytes());
         let target = [0xFFu8; 32];
 
-        assert!(verify(&params, &prev, epoch, &header, nonce_offset, &target));
+        assert!(verify(
+            &params,
+            &prev,
+            epoch,
+            &header,
+            nonce_offset,
+            &target
+        ));
     }
 
     #[test]
@@ -807,10 +848,18 @@ mod tests {
         let epoch = 9;
         let nonce_offset = 8usize;
         let mut header = vec![0x11u8; 24];
-        header[nonce_offset..nonce_offset + 8].copy_from_slice(&0xA5A5_A5A5_A5A5_A5A5u64.to_be_bytes());
+        header[nonce_offset..nonce_offset + 8]
+            .copy_from_slice(&0xA5A5_A5A5_A5A5_A5A5u64.to_be_bytes());
         let mut target = [0xFFu8; 32];
         target[8..].fill(0x00);
 
-        assert!(verify(&params, &prev, epoch, &header, nonce_offset, &target));
+        assert!(verify(
+            &params,
+            &prev,
+            epoch,
+            &header,
+            nonce_offset,
+            &target
+        ));
     }
 }

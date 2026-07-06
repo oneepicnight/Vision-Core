@@ -1,11 +1,11 @@
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-use crate::chain::ChainState;
 use crate::chain::accept::{apply_block, AcceptResult};
-use crate::miner::job::{MiningJob, build_candidate};
+use crate::chain::ChainState;
+use crate::miner::job::{build_candidate_with_params, MiningJob};
 use crate::pow::visionx::VisionXParams;
 use crate::types::Tx;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Global monotonic job counter.
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
@@ -68,7 +68,9 @@ impl MinerManager {
         }
         tracing::debug!(
             "[MINER] New job id={} h={} diff={}",
-            job.job_id, job.header_template.number, job.target_difficulty
+            job.job_id,
+            job.header_template.number,
+            job.target_difficulty
         );
         inner.current_job = Some(job);
     }
@@ -101,7 +103,7 @@ impl MinerManager {
         let inner = self.inner.lock().unwrap();
         MiningStats {
             blocks_found: inner.blocks_found,
-            start_time:   inner.start_time,
+            start_time: inner.start_time,
         }
     }
 
@@ -144,7 +146,8 @@ impl MinerManager {
 
         // Collect ancestor window for difficulty calculation.
         let limit = (crate::config::constants::RETARGET_WINDOW + 1) as usize;
-        let window: Vec<crate::types::Block> = g.blocks
+        let window: Vec<crate::types::Block> = g
+            .blocks
             .iter()
             .rev()
             .take(limit)
@@ -155,7 +158,15 @@ impl MinerManager {
             .collect();
 
         let job_id = Self::next_job_id();
-        Some(build_candidate(tip, job_id, miner_addr, mempool_txs, &window, now))
+        Some(build_candidate_with_params(
+            tip,
+            job_id,
+            miner_addr,
+            mempool_txs,
+            &window,
+            now,
+            self.params,
+        ))
     }
 }
 
@@ -199,7 +210,8 @@ mod tests {
     fn build_and_clear_job() {
         let m = default_manager();
         let g = seeded_state();
-        let job = m.build_candidate_for_tip(&g, "addr1", vec![])
+        let job = m
+            .build_candidate_for_tip(&g, "addr1", vec![])
             .expect("should produce a job when chain has genesis");
         m.build_job(job);
         assert!(m.is_mining());
@@ -321,8 +333,11 @@ mod tests {
         // OrphanStored ≠ CanonExtension, so blocks_found must not increment.
         let bad = make_test_block(&"cc".repeat(32), 1, ts, 0xAA);
         let r = m.submit_solution(&mut g, bad);
-        assert!(matches!(r, AcceptResult::StoredOrphan { .. }),
-            "expected StoredOrphan, got {:?}", r);
+        assert!(
+            matches!(r, AcceptResult::StoredOrphan { .. }),
+            "expected StoredOrphan, got {:?}",
+            r
+        );
         assert_eq!(m.stats().blocks_found, 0);
     }
 }
