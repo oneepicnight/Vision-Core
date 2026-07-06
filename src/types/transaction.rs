@@ -1,3 +1,4 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 /// A signed transaction submitted by a user or relayed by a peer.
@@ -50,6 +51,68 @@ pub fn canonical_tx_id(tx: &Tx) -> String {
     hex::encode(blake3::hash(&payload).as_bytes())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxSignatureError {
+    SenderPubkeyWrongLength,
+    SenderPubkeyNotLowercaseHex,
+    SignatureWrongLength,
+    SignatureNotLowercaseHex,
+    MalformedPublicKey,
+    InvalidSignature,
+}
+
+fn is_lowercase_hex(s: &str) -> bool {
+    s.as_bytes()
+        .iter()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn decode_sender_pubkey(sender_pubkey: &str) -> Result<[u8; 32], TxSignatureError> {
+    if sender_pubkey.len() != 64 {
+        return Err(TxSignatureError::SenderPubkeyWrongLength);
+    }
+    if !is_lowercase_hex(sender_pubkey) {
+        return Err(TxSignatureError::SenderPubkeyNotLowercaseHex);
+    }
+
+    let bytes =
+        hex::decode(sender_pubkey).map_err(|_| TxSignatureError::SenderPubkeyNotLowercaseHex)?;
+    bytes
+        .try_into()
+        .map_err(|_| TxSignatureError::SenderPubkeyWrongLength)
+}
+
+fn decode_signature(sig: &str) -> Result<[u8; 64], TxSignatureError> {
+    if sig.len() != 128 {
+        return Err(TxSignatureError::SignatureWrongLength);
+    }
+    if !is_lowercase_hex(sig) {
+        return Err(TxSignatureError::SignatureNotLowercaseHex);
+    }
+
+    let bytes = hex::decode(sig).map_err(|_| TxSignatureError::SignatureNotLowercaseHex)?;
+    bytes
+        .try_into()
+        .map_err(|_| TxSignatureError::SignatureWrongLength)
+}
+
+/// Verify the hex-encoded Ed25519 transaction signature.
+///
+/// The signature must verify over `canonical_unsigned_payload(tx)`, which is
+/// bincode serialization of the clean `Tx` envelope with `sig` cleared.
+pub fn verify_tx_signature(tx: &Tx) -> Result<(), TxSignatureError> {
+    let pubkey_bytes = decode_sender_pubkey(&tx.sender_pubkey)?;
+    let sig_bytes = decode_signature(&tx.sig)?;
+
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|_| TxSignatureError::MalformedPublicKey)?;
+    let signature = Signature::from_bytes(&sig_bytes);
+
+    verifying_key
+        .verify(&canonical_unsigned_payload(tx), &signature)
+        .map_err(|_| TxSignatureError::InvalidSignature)
+}
+
 impl Tx {
     /// Compatibility transaction id currently used by existing block and
     /// mempool paths.
@@ -65,30 +128,58 @@ impl Tx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn sample_tx() -> Tx {
         Tx {
-            nonce:        1,
+            nonce: 1,
             sender_pubkey: "aa".repeat(32),
-            module:       "cash".to_string(),
-            method:       "transfer".to_string(),
-            args:         vec![0xde, 0xad, 0xbe, 0xef],
-            tip:          100,
-            fee_limit:    10_000,
-            sig:          "11".repeat(64),
+            module: "cash".to_string(),
+            method: "transfer".to_string(),
+            args: vec![0xde, 0xad, 0xbe, 0xef],
+            tip: 100,
+            fee_limit: 10_000,
+            sig: "11".repeat(64),
         }
     }
 
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn signed_sample_tx() -> Tx {
+        let signing_key = signing_key(7);
+        let mut tx = sample_tx();
+        tx.sender_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        tx.sig.clear();
+
+        let sig = signing_key.sign(&canonical_unsigned_payload(&tx));
+        tx.sig = hex::encode(sig.to_bytes());
+        tx
+    }
+    fn malformed_public_key_hex() -> String {
+        for candidate in 0u16..=u16::MAX {
+            let mut bytes = [0u8; 32];
+            bytes[0] = candidate as u8;
+            bytes[1] = (candidate >> 8) as u8;
+
+            if ed25519_dalek::VerifyingKey::from_bytes(&bytes).is_err() {
+                return hex::encode(bytes);
+            }
+        }
+
+        panic!("expected at least one malformed Ed25519 public key candidate");
+    }
     fn coinbase_tx(height: u64) -> Tx {
         Tx {
-            nonce:        height,
+            nonce: height,
             sender_pubkey: String::new(),
-            module:       "coinbase".to_string(),
-            method:       "reward".to_string(),
-            args:         height.to_be_bytes().to_vec(),
-            tip:          0,
-            fee_limit:    0,
-            sig:          String::new(),
+            module: "coinbase".to_string(),
+            method: "reward".to_string(),
+            args: height.to_be_bytes().to_vec(),
+            tip: 0,
+            fee_limit: 0,
+            sig: String::new(),
         }
     }
 
@@ -225,6 +316,138 @@ mod tests {
 
         assert_eq!(payload1, payload2);
         assert!(!hex::encode(payload1).contains(&"11".repeat(64)));
+    }
+
+    #[test]
+    fn tx_signature_accepts_valid_ed25519_signature() {
+        let tx = signed_sample_tx();
+        assert_eq!(verify_tx_signature(&tx), Ok(()));
+    }
+
+    #[test]
+    fn tx_signature_rejects_sender_pubkey_wrong_length() {
+        let mut tx = signed_sample_tx();
+        tx.sender_pubkey = "aa".repeat(31);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::SenderPubkeyWrongLength),
+        );
+    }
+
+    #[test]
+    fn tx_signature_rejects_sender_pubkey_not_lowercase_hex() {
+        let mut tx = signed_sample_tx();
+        tx.sender_pubkey = "AA".repeat(32);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::SenderPubkeyNotLowercaseHex),
+        );
+
+        tx.sender_pubkey = "gg".repeat(32);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::SenderPubkeyNotLowercaseHex),
+        );
+    }
+
+    #[test]
+    fn tx_signature_rejects_malformed_public_key() {
+        let mut tx = signed_sample_tx();
+        tx.sender_pubkey = malformed_public_key_hex();
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::MalformedPublicKey),
+        );
+    }
+
+    #[test]
+    fn tx_signature_rejects_signature_wrong_length() {
+        let mut tx = signed_sample_tx();
+        tx.sig = "11".repeat(63);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::SignatureWrongLength),
+        );
+    }
+
+    #[test]
+    fn tx_signature_rejects_signature_not_lowercase_hex() {
+        let mut tx = signed_sample_tx();
+        tx.sig = "AA".repeat(64);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::SignatureNotLowercaseHex),
+        );
+
+        tx.sig = "gg".repeat(64);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::SignatureNotLowercaseHex),
+        );
+    }
+
+    #[test]
+    fn tx_signature_rejects_signature_from_wrong_key() {
+        let good_key = signing_key(7);
+        let wrong_key = signing_key(8);
+        let mut tx = sample_tx();
+        tx.sender_pubkey = hex::encode(wrong_key.verifying_key().to_bytes());
+        tx.sig.clear();
+
+        let sig = good_key.sign(&canonical_unsigned_payload(&tx));
+        tx.sig = hex::encode(sig.to_bytes());
+
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
+    }
+
+    #[test]
+    fn tx_signature_rejects_tampered_signed_fields() {
+        let base = signed_sample_tx();
+
+        let mut tx = base.clone();
+        tx.nonce += 1;
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
+
+        let mut tx = base.clone();
+        tx.module = "stake".to_string();
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
+
+        let mut tx = base.clone();
+        tx.method = "lock".to_string();
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
+
+        let mut tx = base.clone();
+        tx.args.push(0x42);
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
+
+        let mut tx = base.clone();
+        tx.tip += 1;
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
+
+        let mut tx = base;
+        tx.fee_limit += 1;
+        assert_eq!(
+            verify_tx_signature(&tx),
+            Err(TxSignatureError::InvalidSignature),
+        );
     }
 
     #[test]
