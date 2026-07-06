@@ -14,7 +14,7 @@ pub use historical_vpow::{
     historical_vpow_message_bytes,
     historical_vpow_message_bytes_with_nonce_zero,
 };
-pub use visionx::{verify, VisionXParams, compute_visionx_hash, visionx_hash_hex, VISIONX_PARAMS};
+pub use visionx::{verify, VisionXParams, VISIONX_PARAMS};
 pub use visionx_miner::{PowJob, PowSolution, VisionXMiner};
 
 

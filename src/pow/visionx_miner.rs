@@ -216,8 +216,6 @@ impl VisionXMiner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pow::visionx::compute_visionx_hash;
-
     fn small_params() -> VisionXParams {
         VisionXParams {
             dataset_mb: 1,
@@ -295,7 +293,8 @@ mod tests {
         let job = miner
             .build_job([0x44u8; 32], 7, vec![0x11u8; 24], 8, [0x00u8; 32])
             .unwrap();
-        let solution = PowSolution::new(0, compute_visionx_hash(&job.header_bytes, 0, &job.params));
+        let mut solution = job.solution_for_nonce(0).unwrap();
+        solution.hash[0] ^= 0xFF;
 
         assert!(!miner.verify_solution(&job, &solution));
         assert!(miner.mine(&job, 1).is_none());
