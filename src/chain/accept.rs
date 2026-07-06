@@ -12,7 +12,7 @@
 //! 3. **Timestamp validation** â€” monotonic and future-block guard
 //! 4. **Difficulty validation** â€” expected retarget against the parent chain
 //! 5. **PoW validation**       â€” hash meets difficulty target
-//! 6. **State/tx validation**  â€” coinbase height encoding, no intra-block dup tx_ids
+//! 6. **State/tx validation**  â€” coinbase height, tx IDs, transaction execution
 //! 7. **Chain selection**      â€” cumulative-work comparison for side chains
 //! 8. **Integration**          â€” push to canonical, side-chain store, or orphan pool
 
@@ -25,6 +25,7 @@ use crate::chain::ChainState;
 use crate::config::constants::*;
 use crate::pow::difficulty::{calculate_next_difficulty, difficulty_to_target};
 use crate::pow::visionx::historical_block_digest;
+use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionState};
 use crate::types::Block;
 
 // â”€â”€â”€ Acceptance result â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -359,17 +360,31 @@ pub fn apply_block(
         }
     }
 
-    // 6b. No duplicate tx_ids within the block.
+    // 6b. No duplicate canonical tx_ids within the block.
     {
         let mut seen_ids: HashSet<String> = HashSet::with_capacity(blk.txs.len());
         for tx in &blk.txs {
-            let tid = tx.tx_id();
+            let tid = canonical_tx_id(tx);
             if !seen_ids.insert(tid.clone()) {
                 return AcceptResult::Rejected(format!(
-                    "duplicate tx {:.8} in block",
+                    "duplicate canonical tx {:.8} in block",
                     tid
                 ));
             }
+        }
+    }
+
+    // 6c. Validate and execute non-coinbase transactions against temporary state.
+    let mut validated_tx_state = TxExecutionState::from_balances_and_nonces(
+        g.balances.clone(),
+        g.nonces.clone(),
+    );
+    for (idx, tx) in blk.txs.iter().enumerate().skip(1) {
+        if let Err(err) = simulate_tx_execution(&mut validated_tx_state, tx) {
+            return AcceptResult::Rejected(format!(
+                "tx validation failed at index {}: {:?}",
+                idx, err
+            ));
         }
     }
 
@@ -406,6 +421,8 @@ pub fn apply_block(
             "[LANE-A] h={} hash={:.8} cw={} peer={:?}",
             blk.header.number, hash, candidate_cw, source_peer
         );
+        g.balances = validated_tx_state.balances;
+        g.nonces = validated_tx_state.nonces;
         push_canonical(g, blk.clone(), candidate_cw);
         let _ = crate::chain::storage::store_block(g, blk);
         let _ = crate::chain::storage::persist_tip(g);
@@ -514,12 +531,16 @@ pub mod tests_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::tests_helpers::{coinbase_tx, make_test_block};
+    use super::tests_helpers::make_test_block;
     use crate::config::constants::{DIFFICULTY_FLOOR, LWMA_MIN_INTERVAL_SECS, TARGET_BLOCK_TIME};
     use crate::pow::visionx::historical_block_digest;
     use crate::pow::VISIONX_PARAMS;
     use crate::genesis;
-    use crate::types::{BlockHeader, Tx};
+    use crate::types::transaction::{
+        canonical_unsigned_payload, CashTransferArgs, MIN_CASH_TRANSFER_FEE_LIMIT,
+    };
+    use crate::types::Tx;
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
@@ -537,6 +558,90 @@ mod tests {
         let digest = historical_block_digest(&VISIONX_PARAMS, epoch, &blk.header)
             .expect("historical VisionX digest should build");
         blk.header.pow_hash = hex::encode(digest);
+        blk
+    }
+
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn transfer_args(to: &str, amount: u128) -> Vec<u8> {
+        serde_json::to_vec(&CashTransferArgs {
+            to: to.to_string(),
+            amount,
+        })
+        .unwrap()
+    }
+
+    fn sign_tx(mut tx: Tx, seed: u8) -> Tx {
+        let signing_key = signing_key(seed);
+        tx.sender_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        tx.sig.clear();
+        let sig = signing_key.sign(&canonical_unsigned_payload(&tx));
+        tx.sig = hex::encode(sig.to_bytes());
+        tx
+    }
+
+    fn signed_transfer_tx(seed: u8, nonce: u64, to: &str, amount: u128, tip: u64) -> Tx {
+        sign_tx(
+            Tx {
+                nonce,
+                sender_pubkey: String::new(),
+                module: "cash".to_string(),
+                method: "transfer".to_string(),
+                args: transfer_args(to, amount),
+                tip,
+                fee_limit: MIN_CASH_TRANSFER_FEE_LIMIT,
+                sig: String::new(),
+            },
+            seed,
+        )
+    }
+
+    fn signed_custom_tx(seed: u8, module: &str, method: &str, args: Vec<u8>) -> Tx {
+        sign_tx(
+            Tx {
+                nonce: 0,
+                sender_pubkey: String::new(),
+                module: module.to_string(),
+                method: method.to_string(),
+                args,
+                tip: 2,
+                fee_limit: MIN_CASH_TRANSFER_FEE_LIMIT,
+                sig: String::new(),
+            },
+            seed,
+        )
+    }
+
+    fn recompute_tx_root(txs: &[Tx]) -> String {
+        let mut h = blake3::Hasher::new();
+        for tx in txs {
+            h.update(tx.tx_id().as_bytes());
+        }
+        hex::encode(h.finalize().as_bytes())
+    }
+
+    fn rehash_block(block: &mut Block) {
+        block.header.tx_root = recompute_tx_root(&block.txs);
+        block.header.pow_hash.clear();
+        let epoch = VISIONX_PARAMS.epoch(block.header.number);
+        let digest = historical_block_digest(&VISIONX_PARAMS, epoch, &block.header)
+            .expect("historical VisionX digest should build");
+        block.header.pow_hash = hex::encode(digest);
+        block.weight = block.txs.len() as u64;
+    }
+
+    fn block_with_extra_txs(
+        parent_hash: &str,
+        height: u64,
+        timestamp: u64,
+        slot: u8,
+        extra_txs: Vec<Tx>,
+    ) -> Block {
+        let mut blk = make_block(parent_hash, height, timestamp, slot);
+        blk.txs.extend(extra_txs);
+        rehash_block(&mut blk);
         blk
     }
 
@@ -703,6 +808,262 @@ mod tests {
         assert!(!is_pow_prevalidated(b1.hash()), "cache cleared after integration");
     }
 
+    #[test]
+    fn block_acceptance_validates_and_executes_signed_transfer() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let tx = signed_transfer_tx(7, 0, &recipient, 40, 2);
+        let sender = tx.sender_pubkey.clone();
+        g.balances.insert(sender.clone(), 100);
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx],
+        );
+
+        assert_eq!(apply_block(&mut g, &blk, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(g.balance_of(&sender), 57);
+        assert_eq!(g.balance_of(&recipient), 40);
+        assert_eq!(g.nonce_of(&sender), 1);
+    }
+
+    #[test]
+    fn block_acceptance_executes_same_sender_txs_in_nonce_order() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let tx0 = signed_transfer_tx(7, 0, &recipient, 10, 2);
+        let tx1 = signed_transfer_tx(7, 1, &recipient, 20, 2);
+        let sender = tx0.sender_pubkey.clone();
+        g.balances.insert(sender.clone(), 100);
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx0, tx1],
+        );
+
+        assert_eq!(apply_block(&mut g, &blk, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(g.balance_of(&sender), 64);
+        assert_eq!(g.balance_of(&recipient), 30);
+        assert_eq!(g.nonce_of(&sender), 2);
+    }
+
+    #[test]
+    fn block_acceptance_rejects_invalid_signature_without_state_mutation() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let mut tx = signed_transfer_tx(7, 0, &recipient, 40, 2);
+        let sender = tx.sender_pubkey.clone();
+        tx.tip += 1;
+        g.balances.insert(sender.clone(), 100);
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("InvalidSignature"), "reason was: {}", reason);
+        }
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
+    #[test]
+    fn block_acceptance_rejects_bad_nonce_without_state_mutation() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let tx = signed_transfer_tx(7, 1, &recipient, 40, 2);
+        let sender = tx.sender_pubkey.clone();
+        g.balances.insert(sender.clone(), 100);
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("NonceMismatch"), "reason was: {}", reason);
+        }
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
+    #[test]
+    fn block_acceptance_rejects_insufficient_funds_without_state_mutation() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let tx = signed_transfer_tx(7, 0, &recipient, 40, 2);
+        let sender = tx.sender_pubkey.clone();
+        g.balances.insert(sender.clone(), 42);
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("InsufficientBalance"), "reason was: {}", reason);
+        }
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
+    #[test]
+    fn block_acceptance_rejects_bad_transfer_args() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let tx = signed_custom_tx(7, "cash", "transfer", b"not-json".to_vec());
+        let sender = tx.sender_pubkey.clone();
+        g.balances.insert(sender, 100);
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("BadTransferArgs"), "reason was: {}", reason);
+        }
+    }
+
+    #[test]
+    fn block_acceptance_rejects_unsupported_module_method() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let tx = signed_custom_tx(7, "stake", "lock", vec![]);
+        let sender = tx.sender_pubkey.clone();
+        g.balances.insert(sender, 100);
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("UnsupportedModuleMethod"), "reason was: {}", reason);
+        }
+    }
+
+    #[test]
+    fn block_acceptance_rejects_duplicate_canonical_tx_id() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let tx = signed_transfer_tx(7, 0, &recipient, 40, 2);
+        let sender = tx.sender_pubkey.clone();
+        let mut duplicate_intent = tx.clone();
+        duplicate_intent.sig = "00".repeat(64);
+        assert_ne!(tx.tx_id(), duplicate_intent.tx_id());
+        assert_eq!(canonical_tx_id(&tx), canonical_tx_id(&duplicate_intent));
+        g.balances.insert(sender.clone(), 100);
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx, duplicate_intent],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("duplicate canonical tx"), "reason was: {}", reason);
+        }
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
+    #[test]
+    fn block_acceptance_rejects_later_tx_without_partial_state_commit() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let recipient = "bb".repeat(32);
+        let tx0 = signed_transfer_tx(7, 0, &recipient, 10, 2);
+        let tx_gap = signed_transfer_tx(7, 2, &recipient, 20, 2);
+        let sender = tx0.sender_pubkey.clone();
+        g.balances.insert(sender.clone(), 100);
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let blk = block_with_extra_txs(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![tx0, tx_gap],
+        );
+        let result = apply_block(&mut g, &blk, None);
+
+        assert!(matches!(result, AcceptResult::Rejected(_)));
+        if let AcceptResult::Rejected(reason) = result {
+            assert!(reason.contains("NonceMismatch"), "reason was: {}", reason);
+        }
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
     // â”€â”€ Side-chain handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
