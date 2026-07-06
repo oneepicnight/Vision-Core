@@ -1,10 +1,12 @@
 use crate::config::constants::*;
+use crate::pow::historical_vpow::historical_vpow_message_bytes_with_nonce_zero;
 use crate::pow::U256;
+use crate::types::BlockHeader;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// ─── Algorithm parameters ─────────────────────────────────────────────────────
+// â”€â”€â”€ Algorithm parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// VisionX algorithm parameters.
 ///
@@ -236,7 +238,7 @@ fn init_scratch(
     (scratch, smask)
 }
 
-// ─── Hash function (stub) ─────────────────────────────────────────────────────
+// â”€â”€â”€ Hash function (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Compute a VisionX PoW hash for the given header bytes and nonce.
 ///
@@ -248,18 +250,18 @@ fn init_scratch(
 /// do not change them when replacing the body.
 ///
 /// # Arguments
-/// * `header_bytes` — canonical block header bytes (`BlockHeader::canonical_bytes`)
-/// * `nonce`        — nonce being tested by the miner
-/// * `_params`      — VisionX algorithm parameters (used by the real implementation)
+/// * `header_bytes` â€” canonical block header bytes (`BlockHeader::canonical_bytes`)
+/// * `nonce`        â€” nonce being tested by the miner
+/// * `_params`      â€” VisionX algorithm parameters (used by the real implementation)
 ///
 /// # Returns
-/// 32-byte hash value. A block is valid when this value ≤ `difficulty_to_target(difficulty)`.
+/// 32-byte hash value. A block is valid when this value â‰¤ `difficulty_to_target(difficulty)`.
 pub fn compute_visionx_hash(
     header_bytes: &[u8],
     nonce: u64,
     _params: &VisionXParams,
 ) -> [u8; 32] {
-    // STUB: blake3(header_bytes ++ nonce_le) — replace with VisionX DAG algorithm.
+    // STUB: blake3(header_bytes ++ nonce_le) â€” replace with VisionX DAG algorithm.
     let mut input = Vec::with_capacity(header_bytes.len() + 8);
     input.extend_from_slice(header_bytes);
     input.extend_from_slice(&nonce.to_le_bytes());
@@ -349,6 +351,49 @@ fn meets_target(hash: &U256, target: &U256) -> bool {
     &hash[0..8] <= &target[0..8]
 }
 
+fn params_within_bounds(params: &VisionXParams) -> bool {
+    params.dataset_mb <= 512
+        && params.scratch_mb <= 128
+        && params.mix_iters <= 1_000_000
+        && params.reads_per_iter <= 8
+}
+
+fn decode_hash_32(s: &str) -> Result<[u8; 32], String> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).map_err(|e| format!("parent_hash: invalid hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("parent_hash: expected 32 bytes, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Compute the historical VisionX digest for a block header.
+///
+/// The header nonce is not embedded into the historical preimage; it is passed
+/// separately to the VisionX hashing engine.
+pub(crate) fn historical_block_digest(
+    params: &VisionXParams,
+    epoch: u64,
+    header: &BlockHeader,
+) -> Result<U256, String> {
+    if !params_within_bounds(params) {
+        return Err("invalid VisionX parameters".into());
+    }
+
+    let prev_hash32 = decode_hash_32(&header.parent_hash)?;
+    let historical_preimage = historical_vpow_message_bytes_with_nonce_zero(header)?;
+    let (dataset, mask) = VisionXDataset::get_cached(params, &prev_hash32, epoch);
+    Ok(visionx_hash(
+        params,
+        dataset.as_slice(),
+        mask,
+        historical_preimage.as_slice(),
+        header.nonce,
+    ))
+}
+
 /// Verify a historical VisionX candidate.
 ///
 /// Returns `false` on malformed nonce offsets, undersized buffers, or hashes
@@ -362,16 +407,7 @@ pub fn verify(
     nonce_offset: usize,
     target: &U256,
 ) -> bool {
-    if params.dataset_mb > 512 {
-        return false;
-    }
-    if params.scratch_mb > 128 {
-        return false;
-    }
-    if params.mix_iters > 1_000_000 {
-        return false;
-    }
-    if params.reads_per_iter > 8 {
+    if !params_within_bounds(params) {
         return false;
     }
 
@@ -395,7 +431,7 @@ pub fn visionx_hash_hex(header_bytes: &[u8], nonce: u64) -> String {
 mod tests {
     use super::*;
 
-    // ── VisionXParams ────────────────────────────────────────────────────────
+    // â”€â”€ VisionXParams â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn params_default_matches_constants() {
@@ -413,7 +449,7 @@ mod tests {
         assert_eq!(*VISIONX_PARAMS, VisionXParams::default());
     }
 
-    // ── fingerprint ──────────────────────────────────────────────────────────
+    // â”€â”€ fingerprint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn fingerprint_is_deterministic() {
@@ -437,7 +473,7 @@ mod tests {
             "changing any param must change the fingerprint");
     }
 
-    // ── epoch ────────────────────────────────────────────────────────────────
+    // â”€â”€ epoch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn epoch_zero_for_genesis() {
@@ -452,7 +488,7 @@ mod tests {
         assert_eq!(VISIONX_PARAMS.epoch(ep * 2), 2);
     }
 
-    // ── compute_visionx_hash ─────────────────────────────────────────────────
+    // â”€â”€ compute_visionx_hash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn compute_hash_is_deterministic() {

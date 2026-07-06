@@ -1,4 +1,4 @@
-//! Block acceptance — single path for all blocks regardless of source.
+//! Block acceptance â€” single path for all blocks regardless of source.
 //!
 //! Every block (P2P gossip, sync, local mine) MUST go through `apply_block`.
 //! No alternate block integration paths exist in vision-core.
@@ -7,14 +7,14 @@
 //!
 //! `apply_block` drives each candidate through eight explicit stages:
 //!
-//! 1. **Structural validation** — weight limit, tx_root integrity, coinbase presence
-//! 2. **Parent lookup**        — classify as canon-extend, side-chain, or orphan
-//! 3. **Timestamp validation** — monotonic and future-block guard
-//! 4. **Difficulty validation** — expected retarget against the parent chain
-//! 5. **PoW validation**       — hash meets difficulty target
-//! 6. **State/tx validation**  — coinbase height encoding, no intra-block dup tx_ids
-//! 7. **Chain selection**      — cumulative-work comparison for side chains
-//! 8. **Integration**          — push to canonical, side-chain store, or orphan pool
+//! 1. **Structural validation** â€” weight limit, tx_root integrity, coinbase presence
+//! 2. **Parent lookup**        â€” classify as canon-extend, side-chain, or orphan
+//! 3. **Timestamp validation** â€” monotonic and future-block guard
+//! 4. **Difficulty validation** â€” expected retarget against the parent chain
+//! 5. **PoW validation**       â€” hash meets difficulty target
+//! 6. **State/tx validation**  â€” coinbase height encoding, no intra-block dup tx_ids
+//! 7. **Chain selection**      â€” cumulative-work comparison for side chains
+//! 8. **Integration**          â€” push to canonical, side-chain store, or orphan pool
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,14 +23,15 @@ use std::sync::Mutex;
 
 use crate::chain::ChainState;
 use crate::config::constants::*;
-use crate::pow::difficulty::{calculate_next_difficulty, verify_pow_hash};
+use crate::pow::difficulty::{calculate_next_difficulty, difficulty_to_target};
+use crate::pow::visionx::historical_block_digest;
 use crate::types::Block;
 
-// ─── Acceptance result ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Acceptance result â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// The outcome of passing a block through `apply_block`.
 ///
-/// Every possible outcome — including rejection — is a typed variant so
+/// Every possible outcome â€” including rejection â€” is a typed variant so
 /// callers can pattern-match without unwrapping `Result`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptResult {
@@ -56,7 +57,7 @@ impl AcceptResult {
     }
 }
 
-// ─── PoW pre-validation cache ─────────────────────────────────────────────────
+// â”€â”€â”€ PoW pre-validation cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Bounded cache of hashes pre-cleared by `verify_pow_only`.
 ///
@@ -94,7 +95,31 @@ fn clear_pow_prevalidation(block_hash: &str) {
     }
 }
 
-// ─── PoW-only pre-validation (lock-free) ─────────────────────────────────────
+fn verify_visionx_pow(blk: &Block) -> Result<(), String> {
+    let epoch = crate::pow::VISIONX_PARAMS.epoch(blk.header.number);
+    let digest = historical_block_digest(&crate::pow::VISIONX_PARAMS, epoch, &blk.header)?;
+    let target = difficulty_to_target(blk.header.difficulty);
+
+    if &digest[0..8] > &target[0..8] {
+        return Err(format!(
+            "PoW failed: digest {:.8} difficulty {}",
+            hex::encode(digest),
+            blk.header.difficulty
+        ));
+    }
+
+    let computed = hex::encode(digest);
+    if blk.hash() != computed {
+        return Err(format!(
+            "PoW hash mismatch: header={:.8} computed={:.8}",
+            blk.hash(), computed
+        ));
+    }
+
+    Ok(())
+}
+
+// â”€â”€â”€ PoW-only pre-validation (lock-free) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Validate only the PoW hash WITHOUT acquiring the chain state lock.
 ///
@@ -104,19 +129,12 @@ fn clear_pow_prevalidation(block_hash: &str) {
 /// # Consensus-critical
 /// Must produce identical accept/reject decisions on every node.
 pub fn verify_pow_only(blk: &Block) -> anyhow::Result<()> {
-    let hash = blk.hash();
-    if !verify_pow_hash(hash, blk.header.difficulty) {
-        return Err(anyhow::anyhow!(
-            "PoW check failed: hash {} difficulty {}",
-            hash,
-            blk.header.difficulty
-        ));
-    }
-    mark_pow_prevalidated(hash);
+    verify_visionx_pow(blk).map_err(|reason| anyhow::anyhow!("PoW check failed: {}", reason))?;
+    mark_pow_prevalidated(blk.hash());
     Ok(())
 }
 
-// ─── Private helpers ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Current wall-clock time in seconds since the Unix epoch.
 fn wall_clock_secs() -> u64 {
@@ -160,7 +178,7 @@ fn collect_ancestor_window(g: &ChainState, tip_hash: &str) -> Vec<Block> {
         }
     }
 
-    chain.reverse(); // oldest → newest
+    chain.reverse(); // oldest â†’ newest
     chain
 }
 
@@ -175,12 +193,12 @@ fn push_canonical(g: &mut ChainState, blk: Block, cw: u128) {
     g.blocks.push(blk);
 }
 
-// ─── Single-path block acceptance ─────────────────────────────────────────────
+// â”€â”€â”€ Single-path block acceptance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Apply `blk` to the chain state through the eight-stage acceptance pipeline.
 ///
 /// This is the **only** legal entry point for block integration. Every block
-/// source — P2P gossip, sync, or local miner — must call this function.
+/// source â€” P2P gossip, sync, or local miner â€” must call this function.
 ///
 /// Returns a typed [`AcceptResult`]; there are no panics or `unwrap` calls on
 /// the consensus path.
@@ -196,7 +214,7 @@ pub fn apply_block(
 ) -> AcceptResult {
     let hash = blk.hash().to_string();
 
-    // ── Stage 1 — Structural validation ──────────────────────────────────────
+    // â”€â”€ Stage 1 â€” Structural validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // 1a. Block weight must not exceed the consensus limit.
     if blk.weight > BLOCK_WEIGHT_LIMIT {
@@ -228,12 +246,12 @@ pub fn apply_block(
         }
     }
 
-    // 1d. Duplicate block — already integrated or pending.
+    // 1d. Duplicate block â€” already integrated or pending.
     if g.seen_blocks.contains(&hash) {
         return AcceptResult::Rejected(format!("duplicate block {:.8}", hash));
     }
 
-    // ── Stage 2 — Parent lookup ───────────────────────────────────────────────
+    // â”€â”€ Stage 2 â€” Parent lookup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // Genesis special-case: bypass remaining stages and integrate directly.
     if blk.header.number == 0 {
@@ -260,7 +278,7 @@ pub fn apply_block(
     let parent_in_side = g.side_blocks.contains_key(parent_hash.as_str());
 
     if !parent_in_canon && !parent_in_side {
-        // Parent unknown — stash in orphan pool for future promotion.
+        // Parent unknown â€” stash in orphan pool for future promotion.
         crate::chain::orphan::add_orphan(
             g,
             blk.clone(),
@@ -273,7 +291,7 @@ pub fn apply_block(
     let parent_blk = resolve_block(g, &parent_hash)
         .expect("parent confirmed present above");
 
-    // ── Stage 3 — Timestamp validation ───────────────────────────────────────
+    // â”€â”€ Stage 3 â€” Timestamp validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     if blk.header.timestamp <= parent_blk.header.timestamp {
         return AcceptResult::Rejected(format!(
@@ -291,7 +309,7 @@ pub fn apply_block(
         ));
     }
 
-    // ── Stage 4 — Difficulty validation ──────────────────────────────────────
+    // â”€â”€ Stage 4 â€” Difficulty validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // Collect the ancestor window rooted at the parent to compute the
     // expected retarget, correctly handling both canonical and side chains.
@@ -311,19 +329,16 @@ pub fn apply_block(
         ));
     }
 
-    // ── Stage 5 — PoW validation ──────────────────────────────────────────────
+    // â”€â”€ Stage 5 â€” PoW validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     if !is_pow_prevalidated(&hash) {
-        if !verify_pow_hash(&hash, blk.header.difficulty) {
-            return AcceptResult::Rejected(format!(
-                "PoW failed: hash {:.8} difficulty {}",
-                hash, blk.header.difficulty
-            ));
+        if let Err(reason) = verify_visionx_pow(blk) {
+            return AcceptResult::Rejected(reason);
         }
     }
     clear_pow_prevalidation(&hash);
 
-    // ── Stage 6 — State / transaction validation ──────────────────────────────
+    // â”€â”€ Stage 6 â€” State / transaction validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // 6a. Coinbase must encode the correct block height.
     if blk.header.number > 0 {
@@ -358,7 +373,7 @@ pub fn apply_block(
         }
     }
 
-    // ── Stage 7 — Chain selection (cumulative work) ───────────────────────────
+    // â”€â”€ Stage 7 â€” Chain selection (cumulative work) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     // Candidate block's cumulative work = parent's work + this block's difficulty.
     let parent_cw = g.cumulative_work.get(parent_hash.as_str()).copied()
@@ -383,7 +398,7 @@ pub fn apply_block(
             g.blocks.iter().map(|b| b.header.difficulty as u128).sum()
         });
 
-    // ── Stage 8 — Integration ─────────────────────────────────────────────────
+    // â”€â”€ Stage 8 â€” Integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     if parent_hash == tip_hash {
         // LANE-A: straightforward extension of the current canonical tip.
@@ -428,7 +443,7 @@ pub fn apply_block(
     AcceptResult::SideChain { height }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Test helpers exposed to sibling test modules (state, orphan, reorg, snapshots).
 ///
@@ -437,6 +452,8 @@ pub fn apply_block(
 #[cfg(test)]
 pub mod tests_helpers {
     use crate::config::constants::DIFFICULTY_FLOOR;
+    use crate::pow::visionx::historical_block_digest;
+    use crate::pow::VISIONX_PARAMS;
     use crate::types::{Block, BlockHeader, Tx};
 
     /// Build a coinbase transaction encoding `height` as 8-byte big-endian.
@@ -455,7 +472,7 @@ pub mod tests_helpers {
 
     /// Build a non-genesis block suitable for unit tests.
     ///
-    /// `slot` (0x00–0xFE) controls the `pow_hash` prefix byte.  Any slot ≤ 0xFE
+    /// `slot` (0x00â€“0xFE) controls the `pow_hash` prefix byte.  Any slot â‰¤ 0xFE
     /// yields a hash that satisfies PoW at `DIFFICULTY_FLOOR` (difficulty = 1).
     pub fn make_test_block(
         parent_hash: &str,
@@ -471,22 +488,26 @@ pub mod tests_helpers {
             }
             hex::encode(h.finalize().as_bytes())
         };
-        let pow_hash = format!("{:02x}", slot.min(0xFE)).repeat(32);
-        Block {
+        let mut block = Block {
             header: BlockHeader {
                 parent_hash: parent_hash.to_string(),
                 number:      height,
                 timestamp,
                 difficulty:  DIFFICULTY_FLOOR,
                 nonce:       slot as u64,
-                pow_hash,
+                pow_hash:    String::new(),
                 state_root:  "0".repeat(64),
                 tx_root,
                 miner:       "test_miner".to_string(),
             },
             txs,
             weight: 0,
-        }
+        };
+        let epoch = VISIONX_PARAMS.epoch(height);
+        let digest = historical_block_digest(&VISIONX_PARAMS, epoch, &block.header)
+            .expect("test block VisionX digest should build");
+        block.header.pow_hash = hex::encode(digest);
+        block
     }
 }
 
@@ -495,6 +516,8 @@ mod tests {
     use super::*;
     use super::tests_helpers::{coinbase_tx, make_test_block};
     use crate::config::constants::{DIFFICULTY_FLOOR, LWMA_MIN_INTERVAL_SECS, TARGET_BLOCK_TIME};
+    use crate::pow::visionx::historical_block_digest;
+    use crate::pow::VISIONX_PARAMS;
     use crate::genesis;
     use crate::types::{BlockHeader, Tx};
 
@@ -508,7 +531,16 @@ mod tests {
         make_test_block(parent_hash, height, timestamp, slot)
     }
 
-    // ── Canonical append ──────────────────────────────────────────────────────
+    fn visionx_block(parent_hash: &str, height: u64, timestamp: u64, slot: u8) -> Block {
+        let mut blk = make_block(parent_hash, height, timestamp, slot);
+        let epoch = VISIONX_PARAMS.epoch(height);
+        let digest = historical_block_digest(&VISIONX_PARAMS, epoch, &blk.header)
+            .expect("historical VisionX digest should build");
+        blk.header.pow_hash = hex::encode(digest);
+        blk
+    }
+
+    // â”€â”€ Canonical append â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn canon_append_genesis_then_block1() {
@@ -557,7 +589,7 @@ mod tests {
         assert_eq!(g.cumulative_work[b1.hash()], 2 * DIFFICULTY_FLOOR as u128);
     }
 
-    // ── Orphan storage ────────────────────────────────────────────────────────
+    // â”€â”€ Orphan storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn unknown_parent_stored_as_orphan() {
@@ -584,19 +616,19 @@ mod tests {
         let b1 = make_block(gen.hash(), 1, ts1, 0xAA);
         let b2 = make_block(b1.hash(), 2, ts2, 0xBB);
 
-        // b2 arrives first — its parent b1 is not yet known.
+        // b2 arrives first â€” its parent b1 is not yet known.
         let r_orphan = apply_block(&mut g, &b2, None);
         assert!(matches!(r_orphan, AcceptResult::StoredOrphan { .. }));
         assert_eq!(g.blocks.len(), 1, "only genesis integrated");
 
-        // b1 arrives — apply_block should auto-promote b2 from the orphan pool.
+        // b1 arrives â€” apply_block should auto-promote b2 from the orphan pool.
         let r_b1 = apply_block(&mut g, &b1, None);
         assert_eq!(r_b1, AcceptResult::CanonExtension { height: 1 });
         assert_eq!(g.blocks.len(), 3, "genesis + b1 + promoted b2");
         assert_eq!(g.orphan_pool.len(), 0, "orphan pool drained");
     }
 
-    // ── Invalid PoW rejection ─────────────────────────────────────────────────
+    // â”€â”€ Invalid PoW rejection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn invalid_pow_rejected() {
@@ -629,12 +661,38 @@ mod tests {
     }
 
     #[test]
+    fn visionx_block_validation_accepts_valid_block() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let blk = visionx_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let r = apply_block(&mut g, &blk, None);
+        assert_eq!(r, AcceptResult::CanonExtension { height: 1 });
+    }
+
+    #[test]
+    fn visionx_block_validation_rejects_invalid_block() {
+        let mut g = temp_state();
+        let gen = genesis::genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let mut blk = visionx_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        blk.header.nonce ^= 1;
+
+        let r = apply_block(&mut g, &blk, None);
+        assert!(matches!(r, AcceptResult::Rejected(_)), "expected Rejected, got {:?}", r);
+        if let AcceptResult::Rejected(reason) = r {
+            assert!(reason.contains("PoW"), "rejection reason was: {}", reason);
+        }
+    }
+    #[test]
     fn pre_validated_pow_skips_recheck() {
         let mut g = temp_state();
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let b1 = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let b1 = visionx_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
         // Pre-validate before obtaining the chain lock.
         verify_pow_only(&b1).expect("should pre-validate");
         assert!(is_pow_prevalidated(b1.hash()), "should be in cache");
@@ -645,7 +703,7 @@ mod tests {
         assert!(!is_pow_prevalidated(b1.hash()), "cache cleared after integration");
     }
 
-    // ── Side-chain handling ───────────────────────────────────────────────────
+    // â”€â”€ Side-chain handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn competing_block_stored_as_side_chain() {
@@ -655,12 +713,12 @@ mod tests {
 
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
 
-        // b1 extends genesis — becomes canonical tip.
+        // b1 extends genesis â€” becomes canonical tip.
         let b1 = make_block(gen.hash(), 1, ts, 0xAA);
         let r1 = apply_block(&mut g, &b1, None);
         assert_eq!(r1, AcceptResult::CanonExtension { height: 1 });
 
-        // b1_prime also extends genesis (same height, different hash) — side chain.
+        // b1_prime also extends genesis (same height, different hash) â€” side chain.
         let b1p = make_block(gen.hash(), 1, ts, 0xAB);
         let r2 = apply_block(&mut g, &b1p, None);
         assert!(
@@ -676,7 +734,7 @@ mod tests {
         assert!(g.cumulative_work.contains_key(b1p.hash()));
     }
 
-    // ── Other rejection paths ─────────────────────────────────────────────────
+    // â”€â”€ Other rejection paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn wrong_tx_root_rejected() {
@@ -725,7 +783,7 @@ mod tests {
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let far_future = wall_clock_secs() + MAX_FUTURE_TIMESTAMP_SECS + 1;
+        let far_future = u64::MAX;
         let bad = make_block(gen.hash(), 1, far_future, 0xAA);
 
         let r = apply_block(&mut g, &bad, None);
