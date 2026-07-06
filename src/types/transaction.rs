@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +116,7 @@ pub fn verify_tx_signature(tx: &Tx) -> Result<(), TxSignatureError> {
 }
 pub const MAX_SERIALIZED_TX_BYTES: usize = 64 * 1024;
 pub const MIN_CASH_TRANSFER_FEE_LIMIT: u64 = 201;
+pub const CASH_TRANSFER_BASE_FEE: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CashTransferArgs {
@@ -197,6 +200,122 @@ fn validate_cash_transfer_stateless(tx: &Tx) -> Result<(), TxValidationError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TxExecutionState {
+    pub balances: BTreeMap<String, u128>,
+    pub nonces: BTreeMap<String, u64>,
+}
+
+impl TxExecutionState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_balances_and_nonces(
+        balances: BTreeMap<String, u128>,
+        nonces: BTreeMap<String, u64>,
+    ) -> Self {
+        Self { balances, nonces }
+    }
+
+    pub fn balance_of(&self, address: &str) -> u128 {
+        self.balances.get(address).copied().unwrap_or(0)
+    }
+
+    pub fn nonce_of(&self, address: &str) -> u64 {
+        self.nonces.get(address).copied().unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxExecutionOutcome {
+    pub sender: String,
+    pub recipient: String,
+    pub amount: u128,
+    pub charged_fee: u64,
+    pub next_sender_nonce: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxExecutionError {
+    Validation(TxValidationError),
+    NonceMismatch { expected: u64, actual: u64 },
+    FeeExceedsLimit { charged_fee: u64, fee_limit: u64 },
+    InsufficientBalance { available: u128, required: u128 },
+    ArithmeticOverflow,
+}
+
+/// Execute one transaction against temporary balance/nonce state.
+///
+/// This helper is intentionally not wired into block validation or mempool
+/// admission yet. It simulates the state transition for canonical
+/// `cash::transfer` transactions only; fee distribution is reported as the
+/// charged fee and left to a later block economics decision.
+pub fn simulate_tx_execution(
+    state: &mut TxExecutionState,
+    tx: &Tx,
+) -> Result<TxExecutionOutcome, TxExecutionError> {
+    if tx.module != "cash" || tx.method != "transfer" {
+        return Err(TxExecutionError::Validation(
+            TxValidationError::UnsupportedModuleMethod,
+        ));
+    }
+
+    validate_tx_stateless(tx).map_err(TxExecutionError::Validation)?;
+
+    let sender = tx.sender_pubkey.clone();
+    let expected_nonce = state.nonce_of(&sender);
+    if tx.nonce != expected_nonce {
+        return Err(TxExecutionError::NonceMismatch {
+            expected: expected_nonce,
+            actual: tx.nonce,
+        });
+    }
+
+    let args = decode_cash_transfer_args(&tx.args).map_err(TxExecutionError::Validation)?;
+    let charged_fee = CASH_TRANSFER_BASE_FEE
+        .checked_add(tx.tip)
+        .ok_or(TxExecutionError::ArithmeticOverflow)?;
+    if charged_fee > tx.fee_limit {
+        return Err(TxExecutionError::FeeExceedsLimit {
+            charged_fee,
+            fee_limit: tx.fee_limit,
+        });
+    }
+
+    let total_cost = args
+        .amount
+        .checked_add(u128::from(charged_fee))
+        .ok_or(TxExecutionError::ArithmeticOverflow)?;
+    let available = state.balance_of(&sender);
+    if available < total_cost {
+        return Err(TxExecutionError::InsufficientBalance {
+            available,
+            required: total_cost,
+        });
+    }
+
+    let recipient_balance = state.balance_of(&args.to);
+    let new_recipient_balance = recipient_balance
+        .checked_add(args.amount)
+        .ok_or(TxExecutionError::ArithmeticOverflow)?;
+    let next_sender_nonce = expected_nonce
+        .checked_add(1)
+        .ok_or(TxExecutionError::ArithmeticOverflow)?;
+
+    state.balances.insert(sender.clone(), available - total_cost);
+    state.balances.insert(args.to.clone(), new_recipient_balance);
+    state.nonces.insert(sender.clone(), next_sender_nonce);
+
+    Ok(TxExecutionOutcome {
+        sender,
+        recipient: args.to,
+        amount: args.amount,
+        charged_fee,
+        next_sender_nonce,
+    })
+}
+
 impl Tx {
     /// Compatibility transaction id currently used by existing block and
     /// mempool paths.
@@ -260,21 +379,33 @@ mod tests {
         tx
     }
 
-    fn signed_transfer_tx(to: &str, amount: u128, fee_limit: u64) -> Tx {
+    fn signed_transfer_tx_with(
+        seed: u8,
+        nonce: u64,
+        to: &str,
+        amount: u128,
+        tip: u64,
+        fee_limit: u64,
+    ) -> Tx {
         sign_tx(
             Tx {
-                nonce: 0,
+                nonce,
                 sender_pubkey: String::new(),
                 module: "cash".to_string(),
                 method: "transfer".to_string(),
                 args: transfer_args(to, amount),
-                tip: 2,
+                tip,
                 fee_limit,
                 sig: String::new(),
             },
-            7,
+            seed,
         )
     }
+
+    fn signed_transfer_tx(to: &str, amount: u128, fee_limit: u64) -> Tx {
+        signed_transfer_tx_with(7, 0, to, amount, 2, fee_limit)
+    }
+
     fn malformed_public_key_hex() -> String {
         for candidate in 0u16..=u16::MAX {
             let mut bytes = [0u8; 32];
@@ -568,7 +699,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn cash_transfer_args_decode_valid_json() {
         let to = "bb".repeat(32);
@@ -700,6 +830,202 @@ mod tests {
         tx = sign_tx(tx, 7);
         assert_eq!(validate_tx_stateless(&tx), Ok(()));
     }
+
+    #[test]
+    fn stateful_execution_accepts_first_nonce_zero_for_new_account() {
+        let recipient = "bb".repeat(32);
+        let tx = signed_transfer_tx(&recipient, 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender.clone(), 100);
+
+        let outcome = simulate_tx_execution(&mut state, &tx).unwrap();
+
+        assert_eq!(outcome.sender, sender);
+        assert_eq!(outcome.recipient, recipient);
+        assert_eq!(outcome.amount, 42);
+        assert_eq!(outcome.charged_fee, CASH_TRANSFER_BASE_FEE + tx.tip);
+        assert_eq!(outcome.next_sender_nonce, 1);
+        assert_eq!(state.balance_of(&outcome.sender), 55);
+        assert_eq!(state.balance_of(&outcome.recipient), 42);
+        assert_eq!(state.nonce_of(&outcome.sender), 1);
+    }
+
+    #[test]
+    fn stateful_execution_rejects_first_nonce_one_for_new_account() {
+        let tx = signed_transfer_tx_with(
+            7,
+            1,
+            &"bb".repeat(32),
+            42,
+            2,
+            MIN_CASH_TRANSFER_FEE_LIMIT,
+        );
+        let sender = tx.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender, 100);
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx),
+            Err(TxExecutionError::NonceMismatch {
+                expected: 0,
+                actual: 1,
+            }),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn stateful_execution_rejects_stale_nonce_without_mutation() {
+        let tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender.clone(), 100);
+        state.nonces.insert(sender, 1);
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx),
+            Err(TxExecutionError::NonceMismatch {
+                expected: 1,
+                actual: 0,
+            }),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn stateful_execution_debits_cost_and_credits_recipient() {
+        let recipient = "bb".repeat(32);
+        let tx = signed_transfer_tx_with(7, 0, &recipient, 10, 5, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender.clone(), 100);
+
+        simulate_tx_execution(&mut state, &tx).unwrap();
+
+        assert_eq!(state.balance_of(&sender), 84);
+        assert_eq!(state.balance_of(&recipient), 10);
+        assert_eq!(state.nonce_of(&sender), 1);
+    }
+
+    #[test]
+    fn stateful_execution_rejects_fee_above_fee_limit_without_mutation() {
+        let tx = signed_transfer_tx_with(
+            7,
+            0,
+            &"bb".repeat(32),
+            10,
+            250,
+            MIN_CASH_TRANSFER_FEE_LIMIT,
+        );
+        let sender = tx.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender, 1_000);
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx),
+            Err(TxExecutionError::FeeExceedsLimit {
+                charged_fee: 251,
+                fee_limit: MIN_CASH_TRANSFER_FEE_LIMIT,
+            }),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn stateful_execution_rejects_insufficient_balance_without_mutation() {
+        let tx = signed_transfer_tx(&"bb".repeat(32), 10, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender, 12);
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx),
+            Err(TxExecutionError::InsufficientBalance {
+                available: 12,
+                required: 13,
+            }),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn stateful_execution_allows_same_sender_strict_nonce_order() {
+        let recipient = "bb".repeat(32);
+        let tx0 = signed_transfer_tx_with(7, 0, &recipient, 10, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let tx1 = signed_transfer_tx_with(7, 1, &recipient, 20, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx0.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender.clone(), 100);
+
+        simulate_tx_execution(&mut state, &tx0).unwrap();
+        simulate_tx_execution(&mut state, &tx1).unwrap();
+
+        assert_eq!(state.balance_of(&sender), 64);
+        assert_eq!(state.balance_of(&recipient), 30);
+        assert_eq!(state.nonce_of(&sender), 2);
+    }
+
+    #[test]
+    fn stateful_execution_rejects_same_sender_out_of_order() {
+        let recipient = "bb".repeat(32);
+        let tx0 = signed_transfer_tx_with(7, 0, &recipient, 10, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let tx1 = signed_transfer_tx_with(7, 1, &recipient, 20, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx0.sender_pubkey.clone();
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender, 100);
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx1),
+            Err(TxExecutionError::NonceMismatch {
+                expected: 0,
+                actual: 1,
+            }),
+        );
+        assert_eq!(state, before);
+        assert!(simulate_tx_execution(&mut state, &tx0).is_ok());
+    }
+
+    #[test]
+    fn stateful_execution_reuses_stateless_signature_validation() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 10, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let sender = tx.sender_pubkey.clone();
+        tx.tip += 1;
+        let mut state = TxExecutionState::new();
+        state.balances.insert(sender, 100);
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx),
+            Err(TxExecutionError::Validation(TxValidationError::Signature(
+                TxSignatureError::InvalidSignature,
+            ))),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn stateful_execution_rejects_unsupported_method() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 10, MIN_CASH_TRANSFER_FEE_LIMIT);
+        tx.module = "coinbase".to_string();
+        tx.method = "reward".to_string();
+        let mut state = TxExecutionState::new();
+        let before = state.clone();
+
+        assert_eq!(
+            simulate_tx_execution(&mut state, &tx),
+            Err(TxExecutionError::Validation(
+                TxValidationError::UnsupportedModuleMethod,
+            )),
+        );
+        assert_eq!(state, before);
+    }
+
     #[test]
     fn coinbase_tx_has_empty_sender_and_sig() {
         let cb = coinbase_tx(100);
