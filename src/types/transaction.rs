@@ -112,6 +112,90 @@ pub fn verify_tx_signature(tx: &Tx) -> Result<(), TxSignatureError> {
         .verify(&canonical_unsigned_payload(tx), &signature)
         .map_err(|_| TxSignatureError::InvalidSignature)
 }
+pub const MAX_SERIALIZED_TX_BYTES: usize = 64 * 1024;
+pub const MIN_CASH_TRANSFER_FEE_LIMIT: u64 = 201;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CashTransferArgs {
+    pub to: String,
+    pub amount: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxValidationError {
+    TxTooLarge,
+    MissingSenderPubkey,
+    MissingSignature,
+    UnsupportedModuleMethod,
+    BadTransferArgs,
+    InvalidTransferDestination,
+    TransferAmountZero,
+    TransferToSelf,
+    FeeLimitTooLow,
+    Signature(TxSignatureError),
+}
+
+fn serialized_tx_size(tx: &Tx) -> usize {
+    bincode::serialize(tx)
+        .expect("serializing Tx to bincode should not fail")
+        .len()
+}
+
+fn is_lowercase_hex_32_bytes(s: &str) -> bool {
+    s.len() == 64 && is_lowercase_hex(s)
+}
+
+pub fn decode_cash_transfer_args(args: &[u8]) -> Result<CashTransferArgs, TxValidationError> {
+    serde_json::from_slice(args).map_err(|_| TxValidationError::BadTransferArgs)
+}
+
+/// Validate transaction rules that do not require account state.
+///
+/// This helper verifies only transaction shape, supported module/method,
+/// signature, transfer args, and minimum fee authorization. It deliberately
+/// does not inspect balances, account nonces, chain state, mempool state, or
+/// block context.
+pub fn validate_tx_stateless(tx: &Tx) -> Result<(), TxValidationError> {
+    if serialized_tx_size(tx) > MAX_SERIALIZED_TX_BYTES {
+        return Err(TxValidationError::TxTooLarge);
+    }
+
+    if tx.module == "coinbase" && tx.method == "reward" {
+        return Ok(());
+    }
+    if tx.sender_pubkey.is_empty() {
+        return Err(TxValidationError::MissingSenderPubkey);
+    }
+    if tx.sig.is_empty() {
+        return Err(TxValidationError::MissingSignature);
+    }
+
+    match (tx.module.as_str(), tx.method.as_str()) {
+        ("cash", "transfer") => validate_cash_transfer_stateless(tx),
+        _ => Err(TxValidationError::UnsupportedModuleMethod),
+    }
+}
+
+fn validate_cash_transfer_stateless(tx: &Tx) -> Result<(), TxValidationError> {
+    if tx.fee_limit < MIN_CASH_TRANSFER_FEE_LIMIT {
+        return Err(TxValidationError::FeeLimitTooLow);
+    }
+
+    verify_tx_signature(tx).map_err(TxValidationError::Signature)?;
+
+    let args = decode_cash_transfer_args(&tx.args)?;
+    if !is_lowercase_hex_32_bytes(&args.to) {
+        return Err(TxValidationError::InvalidTransferDestination);
+    }
+    if args.amount == 0 {
+        return Err(TxValidationError::TransferAmountZero);
+    }
+    if args.to == tx.sender_pubkey {
+        return Err(TxValidationError::TransferToSelf);
+    }
+
+    Ok(())
+}
 
 impl Tx {
     /// Compatibility transaction id currently used by existing block and
@@ -156,6 +240,40 @@ mod tests {
         let sig = signing_key.sign(&canonical_unsigned_payload(&tx));
         tx.sig = hex::encode(sig.to_bytes());
         tx
+    }
+
+    fn transfer_args(to: &str, amount: u128) -> Vec<u8> {
+        serde_json::to_vec(&CashTransferArgs {
+            to: to.to_string(),
+            amount,
+        })
+        .unwrap()
+    }
+
+    fn sign_tx(mut tx: Tx, seed: u8) -> Tx {
+        let signing_key = signing_key(seed);
+        tx.sender_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        tx.sig.clear();
+
+        let sig = signing_key.sign(&canonical_unsigned_payload(&tx));
+        tx.sig = hex::encode(sig.to_bytes());
+        tx
+    }
+
+    fn signed_transfer_tx(to: &str, amount: u128, fee_limit: u64) -> Tx {
+        sign_tx(
+            Tx {
+                nonce: 0,
+                sender_pubkey: String::new(),
+                module: "cash".to_string(),
+                method: "transfer".to_string(),
+                args: transfer_args(to, amount),
+                tip: 2,
+                fee_limit,
+                sig: String::new(),
+            },
+            7,
+        )
     }
     fn malformed_public_key_hex() -> String {
         for candidate in 0u16..=u16::MAX {
@@ -450,6 +568,138 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn cash_transfer_args_decode_valid_json() {
+        let to = "bb".repeat(32);
+        let args = decode_cash_transfer_args(&transfer_args(&to, 42)).unwrap();
+        assert_eq!(args.to, to);
+        assert_eq!(args.amount, 42);
+    }
+
+    #[test]
+    fn stateless_validation_accepts_valid_cash_transfer() {
+        let tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        assert_eq!(validate_tx_stateless(&tx), Ok(()));
+    }
+
+    #[test]
+    fn stateless_validation_rejects_oversized_serialized_tx() {
+        let mut tx = sample_tx();
+        tx.args = vec![0; MAX_SERIALIZED_TX_BYTES];
+        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::TxTooLarge));
+    }
+
+    #[test]
+    fn stateless_validation_requires_sender_for_non_coinbase() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        tx.sender_pubkey.clear();
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::MissingSenderPubkey),
+        );
+    }
+
+    #[test]
+    fn stateless_validation_requires_signature_for_non_coinbase() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        tx.sig.clear();
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::MissingSignature),
+        );
+    }
+
+    #[test]
+    fn stateless_validation_exempts_coinbase_reward_signature() {
+        let tx = coinbase_tx(10);
+        assert_eq!(validate_tx_stateless(&tx), Ok(()));
+    }
+
+    #[test]
+    fn stateless_validation_rejects_unsupported_module_method() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        tx.module = "stake".to_string();
+        tx.method = "lock".to_string();
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::UnsupportedModuleMethod),
+        );
+    }
+
+    #[test]
+    fn stateless_validation_rejects_bad_transfer_args() {
+        let tx = sign_tx(
+            Tx {
+                nonce: 0,
+                sender_pubkey: String::new(),
+                module: "cash".to_string(),
+                method: "transfer".to_string(),
+                args: b"not-json".to_vec(),
+                tip: 2,
+                fee_limit: MIN_CASH_TRANSFER_FEE_LIMIT,
+                sig: String::new(),
+            },
+            7,
+        );
+        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::BadTransferArgs));
+    }
+
+    #[test]
+    fn stateless_validation_rejects_invalid_transfer_destination() {
+        let tx = signed_transfer_tx(&"bb".repeat(31), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::InvalidTransferDestination),
+        );
+
+        let tx = signed_transfer_tx(&"BB".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::InvalidTransferDestination),
+        );
+    }
+
+    #[test]
+    fn stateless_validation_rejects_zero_transfer_amount() {
+        let tx = signed_transfer_tx(&"bb".repeat(32), 0, MIN_CASH_TRANSFER_FEE_LIMIT);
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::TransferAmountZero),
+        );
+    }
+
+    #[test]
+    fn stateless_validation_rejects_transfer_to_self() {
+        let signing_key = signing_key(7);
+        let sender = hex::encode(signing_key.verifying_key().to_bytes());
+        let tx = signed_transfer_tx(&sender, 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::TransferToSelf));
+    }
+
+    #[test]
+    fn stateless_validation_enforces_minimum_fee_limit() {
+        let tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT - 1);
+        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::FeeLimitTooLow));
+    }
+
+    #[test]
+    fn stateless_validation_rejects_invalid_signature() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        tx.tip += 1;
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::Signature(TxSignatureError::InvalidSignature)),
+        );
+    }
+
+    #[test]
+    fn stateless_validation_does_not_check_nonce() {
+        let mut tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT);
+        tx.nonce = u64::MAX;
+        tx = sign_tx(tx, 7);
+        assert_eq!(validate_tx_stateless(&tx), Ok(()));
+    }
     #[test]
     fn coinbase_tx_has_empty_sender_and_sig() {
         let cb = coinbase_tx(100);
