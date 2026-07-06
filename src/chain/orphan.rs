@@ -94,11 +94,57 @@ mod tests {
     use crate::chain::state::ChainState;
     use crate::config::constants::TARGET_BLOCK_TIME;
     use crate::genesis::genesis_block;
+    use crate::types::{Block, BlockHeader, Tx};
     use crate::chain::accept::tests_helpers::make_test_block;
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
         ChainState::empty(db)
+    }
+
+    fn coinbase_tx(height: u64) -> Tx {
+        Tx {
+            nonce:         height,
+            sender_pubkey: String::new(),
+            module:        "coinbase".to_string(),
+            method:        "reward".to_string(),
+            args:          height.to_be_bytes().to_vec(),
+            tip:           0,
+            fee_limit:     0,
+            sig:           String::new(),
+        }
+    }
+
+    fn make_orphan_bookkeeping_block(
+        parent_hash: &str,
+        height: u64,
+        timestamp: u64,
+        slot: u8,
+    ) -> Block {
+        let txs = vec![coinbase_tx(height)];
+        let tx_root = {
+            let mut h = blake3::Hasher::new();
+            for tx in &txs {
+                h.update(tx.tx_id().as_bytes());
+            }
+            hex::encode(h.finalize().as_bytes())
+        };
+
+        Block {
+            header: BlockHeader {
+                parent_hash: parent_hash.to_string(),
+                number:      height,
+                timestamp,
+                difficulty:  crate::config::constants::DIFFICULTY_FLOOR,
+                nonce:       slot as u64,
+                pow_hash:    format!("{:064x}", slot),
+                state_root:  "0".repeat(64),
+                tx_root,
+                miner:       "test_miner".to_string(),
+            },
+            txs,
+            weight: 0,
+        }
     }
 
     #[test]
@@ -147,7 +193,7 @@ mod tests {
 
         for i in 0..=(ORPHAN_POOL_MAX as u64) {
             let fake_parent = format!("{:064x}", i);
-            let blk = make_test_block(&fake_parent, i + 100, 1_700_000_000 + i * 30, 0xAA);
+            let blk = make_orphan_bookkeeping_block(&fake_parent, i + 100, 1_700_000_000 + i * 30, 0xAA);
             add_orphan(&mut g, blk, "peer_flood");
         }
 
@@ -185,3 +231,4 @@ mod tests {
         assert!(!g.orphan_by_hash.contains_key(&b1_hash));
     }
 }
+
