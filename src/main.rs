@@ -62,6 +62,7 @@ async fn async_main() -> Result<()> {
 
     let chain = Arc::new(Mutex::new(chain_state));
     let peer_manager = Arc::new(p2p::peer_manager::PeerManager::new());
+    let mempool = Arc::new(mempool::Mempool::new());
 
     // ── Seed peers ────────────────────────────────────────────────────────────
     let seed_addrs = node::bootstrap::seed_peers(&settings);
@@ -74,7 +75,9 @@ async fn async_main() -> Result<()> {
     node::services::start_services(chain.clone(), peer_manager.clone(), &settings).await?;
 
     // ── HTTP API ──────────────────────────────────────────────────────────────
-    let app = api::routes::api_router();
+    let api_state = api::state::NodeApiState::new(chain.clone(), mempool)
+        .with_peer_manager(peer_manager.clone());
+    let app = api::routes::api_router(api_state);
     let http_addr: std::net::SocketAddr = settings.http_addr.parse()?;
     tracing::info!("[API] Listening on http://{}", http_addr);
 

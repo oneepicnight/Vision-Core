@@ -1,28 +1,38 @@
-use axum::Json;
-use serde::Serialize;
+use axum::{extract::State, Json};
 
-/// Node status response.
-#[derive(Serialize)]
-pub struct StatusResponse {
-    pub version: &'static str,
-    pub height: u64,
-    pub tip_hash: String,
-    pub difficulty: u64,
-    pub peer_count: usize,
-    pub mining: bool,
-}
+use crate::api::state::{NodeApiState, NodeStatusSnapshot};
+
+pub(crate) type StatusResponse = NodeStatusSnapshot;
 
 /// GET /status
 ///
-/// Returns a summary of the node's current state. Safe to call at any time.
-pub async fn get_status() -> Json<StatusResponse> {
-    // Stub: real implementation wires into shared ChainState via Axum State extractor.
-    Json(StatusResponse {
-        version:    crate::config::constants::NODE_VERSION,
-        height:     0,
-        tip_hash:   crate::genesis::genesis::GENESIS_HASH.to_string(),
-        difficulty: 1,
-        peer_count: 0,
-        mining:     false,
-    })
+/// Returns a read-only snapshot of the node's current state.
+pub(crate) async fn get_status(State(state): State<NodeApiState>) -> Json<StatusResponse> {
+    Json(state.status_snapshot().await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::ChainState;
+    use crate::mempool::Mempool;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn temp_state() -> ChainState {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        ChainState::empty(db)
+    }
+
+    #[tokio::test]
+    async fn status_handler_returns_state_snapshot() {
+        let state = NodeApiState::new(
+            Arc::new(Mutex::new(temp_state())),
+            Arc::new(Mempool::new()),
+        );
+
+        let Json(response) = get_status(State(state.clone())).await;
+
+        assert_eq!(response, state.status_snapshot().await);
+    }
 }
