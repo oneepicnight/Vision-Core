@@ -86,6 +86,11 @@ impl P2PConnectionManager {
             local_node_nonce,
         }
     }
+    /// Nonce used in the local handshake for self-connection detection.
+    pub(crate) fn local_node_nonce(&self) -> u64 {
+        self.local_node_nonce
+    }
+
 
     /// Accept inbound connections in a loop, spawning one task per connection.
     pub async fn run_listener(self: Arc<Self>) -> Result<()> {
@@ -189,6 +194,7 @@ async fn handle_inbound<S>(
                             HandshakeResult::Accepted => {
                                 peer_manager.upsert(&addr.to_string(), false);
                                 peer_manager.set_state(&addr.to_string(), PeerState::Connected);
+                                peer_manager.note_peer_height(&addr.to_string(), remote_hs.chain_height, false);
                                 if let Err(e) = send_message(&mut stream, &P2PMessage::Handshake(local_hs)).await {
                                     tracing::warn!("[P2P] {} handshake send error: {}", addr, e);
                                     break;
@@ -221,6 +227,55 @@ async fn handle_inbound<S>(
                             break;
                         }
                         tracing::trace!("[P2P] -> {} Pong", addr);
+                    }
+                    P2PMessage::GetHeight => {
+                        if !handshake_done {
+                            tracing::warn!("[P2P] {} getheight before handshake - closing", addr);
+                            break;
+                        }
+                        let (height, tip_hash) = {
+                            let g = chain.lock().await;
+                            let height = g.current_height();
+                            let tip_hash = if g.blocks.is_empty() {
+                                None
+                            } else {
+                                Some(g.tip_hash())
+                            };
+                            (height, tip_hash)
+                        };
+                        let reply = P2PMessage::Height { height, tip_hash };
+                        if let Err(e) = send_message(&mut stream, &reply).await {
+                            tracing::warn!("[P2P] {} height send error: {}", addr, e);
+                            break;
+                        }
+                        tracing::trace!("[P2P] -> {} Height", addr);
+                    }
+                    P2PMessage::GetBlock { hash } => {
+                        if !handshake_done {
+                            tracing::warn!("[P2P] {} getblock before handshake - closing", addr);
+                            break;
+                        }
+                        let block = {
+                            let g = chain.lock().await;
+                            g.block_by_hash(&hash)
+                        };
+                        match block {
+                            Some(block) => {
+                                if let Err(e) = send_message(&mut stream, &P2PMessage::Block { block }).await {
+                                    tracing::warn!("[P2P] {} block send error: {}", addr, e);
+                                    break;
+                                }
+                                tracing::trace!("[P2P] -> {} Block {}", addr, hash);
+                            }
+                            None => {
+                                let disconnect = P2PMessage::Disconnect {
+                                    reason: format!("unknown block {}", hash),
+                                };
+                                let _ = send_message(&mut stream, &disconnect).await;
+                                tracing::warn!("[P2P] {} requested unknown block {}", addr, hash);
+                                break;
+                            }
+                        }
                     }
                     P2PMessage::Disconnect { reason } => {
                         tracing::debug!("[P2P] {} disconnected: {}", addr, reason);
@@ -586,3 +641,4 @@ mod tests {
         timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
     }
 }
+

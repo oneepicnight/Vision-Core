@@ -1,13 +1,28 @@
 #[cfg(test)]
 mod tests {
-    use crate::p2p::sync::{watchdog_step, SyncGuard};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    use crate::chain::state::ChainState;
+    use crate::p2p::connection::P2PConnectionManager;
     use crate::p2p::peer_manager::PeerManager;
+    use crate::p2p::sync::{watchdog_step, SyncGuard};
 
     #[tokio::test]
     async fn watchdog_noop_when_synced() {
-        let pm = PeerManager::new();
+        let pm = Arc::new(PeerManager::new());
+        let chain = Arc::new(Mutex::new({
+            let db = sled::Config::new().temporary(true).open().unwrap();
+            ChainState::empty(db)
+        }));
+        let conn_mgr = P2PConnectionManager::new(
+            "127.0.0.1:19999".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        );
         let mut guard = SyncGuard::new();
-        // No peers → best_remote_height = 0 → watchdog is a no-op.
-        watchdog_step(&pm, 0, &mut guard).await.expect("watchdog should not error");
+        watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)
+            .await
+            .expect("watchdog should not error");
     }
 }
