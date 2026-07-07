@@ -1,9 +1,10 @@
-﻿use crate::chain::ChainState;
+use crate::chain::ChainState;
 use crate::config::constants::MAX_REORG;
 use crate::types::Block;
+use crate::chain::state_root::compute_state_root;
 use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionError, TxExecutionState};
 
-// â”€â”€â”€ Chain-select helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Chain-select helpers ─────────────────────────────────────────────────────
 
 /// Walk backwards from `tip_hash` through the side-block store, collecting
 /// every block until a canonical ancestor is reached.
@@ -17,7 +18,7 @@ fn collect_new_segment(g: &ChainState, tip_hash: &str) -> Vec<Block> {
 
     loop {
         if g.canon_index.contains_key(current.as_str()) {
-            // `current` is already canonical â€” it is the common ancestor.
+            // `current` is already canonical — it is the common ancestor.
             break;
         }
         match g.side_blocks.get(current.as_str()) {
@@ -33,18 +34,18 @@ fn collect_new_segment(g: &ChainState, tip_hash: &str) -> Vec<Block> {
         }
     }
 
-    segment.reverse(); // oldest â†’ newest
+    segment.reverse(); // oldest → newest
     segment
 }
 
-// â”€â”€â”€ Reorg entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Reorg entry point ────────────────────────────────────────────────────────
 
 /// Attempt to reorganise to the chain that ends at `new_tip`.
 ///
 /// The function walks backwards through `g.side_blocks` from `new_tip` to
 /// find the common ancestor with the current canonical chain, then:
 ///
-/// 1. Checks that the reorg depth â‰¤ `MAX_REORG` (protects finalised blocks).
+/// 1. Checks that the reorg depth ≤ `MAX_REORG` (protects finalised blocks).
 /// 2. Demotes canonical blocks above the common ancestor to `side_blocks`.
 /// 3. Promotes the new segment from `side_blocks` to canonical.
 /// 4. Rebuilds `canon_index` and `cumulative_work` across the affected range.
@@ -58,10 +59,43 @@ enum SideStateReconstructionError {
         got_parent: String,
     },
     Execution(TxExecutionError),
+    StateRootConstructionFailed,
+    StateRootMismatch {
+        block_hash: String,
+        expected: String,
+        computed: String,
+    },
+}
+
+fn reconstruct_canonical_state_at_height(
+    g: &ChainState,
+    height: u64,
+) -> Result<TxExecutionState, SideStateReconstructionError> {
+    let mut state = TxExecutionState::new();
+
+    for blk in g.blocks.iter().take((height as usize) + 1) {
+        for tx in blk.txs.iter().skip(1) {
+            simulate_tx_execution(&mut state, tx)
+                .map_err(SideStateReconstructionError::Execution)?;
+        }
+
+        if blk.header.number != 0 {
+            let computed_root = compute_state_root(&state.balances, &state.nonces)
+                .map_err(|_| SideStateReconstructionError::StateRootConstructionFailed)?;
+            if computed_root != blk.header.state_root {
+                return Err(SideStateReconstructionError::StateRootMismatch {
+                    block_hash: blk.hash().to_string(),
+                    expected: blk.header.state_root.clone(),
+                    computed: computed_root,
+                });
+            }
+        }
+    }
+
+    Ok(state)
 }
 
 fn reconstruct_branch_state(
-    _g: &ChainState,
     ancestor_hash: &str,
     ancestor_state: &TxExecutionState,
     branch: &[Block],
@@ -82,6 +116,18 @@ fn reconstruct_branch_state(
                 .map_err(SideStateReconstructionError::Execution)?;
         }
 
+        if blk.header.number != 0 {
+            let computed_root = compute_state_root(&state.balances, &state.nonces)
+                .map_err(|_| SideStateReconstructionError::StateRootConstructionFailed)?;
+            if computed_root != blk.header.state_root {
+                return Err(SideStateReconstructionError::StateRootMismatch {
+                    block_hash: blk.hash().to_string(),
+                    expected: blk.header.state_root.clone(),
+                    computed: computed_root,
+                });
+            }
+        }
+
         expected_parent = blk.hash().to_string();
     }
 
@@ -90,14 +136,14 @@ fn reconstruct_branch_state(
 pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
     let new_tip_hash = new_tip.hash();
 
-    // â”€â”€ 1. Trace the new chain segment back to a canonical ancestor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── 1. Trace the new chain segment back to a canonical ancestor ───────────
     let new_segment = collect_new_segment(g, new_tip_hash);
     if new_segment.is_empty() {
         tracing::debug!("[REORG] aborted: cannot trace ancestry of {:.8}", new_tip_hash);
         return false;
     }
 
-    // â”€â”€ 2. Locate the common ancestor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── 2. Locate the common ancestor ──────────────────────────────────────────
     let common_hash = &new_segment[0].header.parent_hash;
     let &common_height = match g.canon_index.get(common_hash.as_str()) {
         Some(h) => h,
@@ -107,7 +153,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         }
     };
 
-    // â”€â”€ 3. Depth guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── 3. Depth guard ─────────────────────────────────────────────────────────
     let reorg_depth = g.current_height().saturating_sub(common_height);
     if reorg_depth > MAX_REORG {
         tracing::warn!(
@@ -117,7 +163,20 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         return false;
     }
 
-    // â”€â”€ 4. Demote canonical blocks above the common ancestor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    let ancestor_state = match reconstruct_canonical_state_at_height(g, common_height) {
+        Ok(state) => state,
+        Err(reason) => {
+            tracing::debug!("[REORG] aborted: ancestor replay validation failed: {:?}", reason);
+            return false;
+        }
+    };
+
+    if let Err(reason) = reconstruct_branch_state(common_hash, &ancestor_state, &new_segment) {
+        tracing::debug!("[REORG] aborted: branch replay validation failed: {:?}", reason);
+        return false;
+    }
+
+    // ── 4. Demote canonical blocks above the common ancestor ───────────────────
     let demoted: Vec<Block> = g.blocks.drain((common_height as usize + 1)..).collect();
     for b in &demoted {
         let h = b.hash().to_string();
@@ -129,13 +188,13 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         demoted.len(), common_height
     );
 
-    // â”€â”€ 5. Promote the new segment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── 5. Promote the new segment ────────────────────────────────────────────
     // Seed cumulative work at the common ancestor; then accumulate forward.
     let mut cw = g.cumulative_work
         .get(common_hash.as_str())
         .copied()
         .unwrap_or_else(|| {
-            // Recompute from the genesis if cache is cold â€” should be rare.
+            // Recompute from the genesis if cache is cold — should be rare.
             g.blocks.iter().map(|b| b.header.difficulty as u128).sum()
         });
 
@@ -173,12 +232,12 @@ pub fn cumulative_work(g: &ChainState, block_hash: &str) -> u128 {
         sum += b.header.difficulty as u128;
         if b.hash() == block_hash {
             return sum;
-        }
+    }
     }
     0
 }
 
-// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -328,7 +387,7 @@ mod tests {
         (g, blocks)
     }
 
-    // â”€â”€ cumulative_work â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── cumulative_work ───────────────────────────────────────────────────────
 
     #[test]
     fn reconstructs_from_canonical_ancestor() {
@@ -361,20 +420,20 @@ mod tests {
             ancestor.header.timestamp + TARGET_BLOCK_TIME,
             0xBB,
             vec![signed_transfer_tx(7, 1, &recipient_2, 10, 1)],
-            &g.balances,
-            &g.nonces,
+            &ancestor_state.balances,
+            &ancestor_state.nonces,
         );
+        let branch_1_state = state_after_block(&ancestor_state, &branch_1);
         let branch_2 = no_op_valid_block(
             branch_1.hash(),
             3,
             branch_1.header.timestamp + TARGET_BLOCK_TIME,
             0xBC,
-            &g.balances,
-            &g.nonces,
+            &branch_1_state.balances,
+            &branch_1_state.nonces,
         );
 
         let reconstructed = reconstruct_branch_state(
-            &g,
             ancestor.hash(),
             &ancestor_state,
             &[branch_1.clone(), branch_2.clone()],
@@ -440,27 +499,26 @@ mod tests {
             ancestor.header.timestamp + TARGET_BLOCK_TIME,
             0xBB,
             vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
-            &g1.balances,
-            &g1.nonces,
+            &ancestor_state.balances,
+            &ancestor_state.nonces,
         );
+        let branch_1_state = state_after_block(&ancestor_state, &branch_1);
         let branch_2 = no_op_valid_block(
             branch_1.hash(),
             3,
             branch_1.header.timestamp + TARGET_BLOCK_TIME,
             0xBC,
-            &g1.balances,
-            &g1.nonces,
+            &branch_1_state.balances,
+            &branch_1_state.nonces,
         );
 
         let reconstructed_1 = reconstruct_branch_state(
-            &g1,
             ancestor.hash(),
             &ancestor_state,
             &[branch_1.clone(), branch_2.clone()],
         )
         .expect("reconstruction should succeed");
         let reconstructed_2 = reconstruct_branch_state(
-            &g2,
             ancestor.hash(),
             &ancestor_state,
             &[branch_1, branch_2],
@@ -500,27 +558,26 @@ mod tests {
             ancestor.header.timestamp + TARGET_BLOCK_TIME,
             0xBB,
             vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
-            &g.balances,
-            &g.nonces,
+            &ancestor_state.balances,
+            &ancestor_state.nonces,
         );
+        let branch_1_state = state_after_block(&ancestor_state, &branch_1);
         let branch_2 = no_op_valid_block(
             branch_1.hash(),
             3,
             branch_1.header.timestamp + TARGET_BLOCK_TIME,
             0xBC,
-            &g.balances,
-            &g.nonces,
+            &branch_1_state.balances,
+            &branch_1_state.nonces,
         );
 
         let reconstructed_1 = reconstruct_branch_state(
-            &g,
             ancestor.hash(),
             &ancestor_state,
             &[branch_1.clone(), branch_2.clone()],
         )
         .expect("reconstruction should succeed");
         let reconstructed_2 = reconstruct_branch_state(
-            &g,
             ancestor.hash(),
             &ancestor_state,
             &[branch_1, branch_2],
@@ -562,20 +619,20 @@ mod tests {
             ancestor.header.timestamp + TARGET_BLOCK_TIME,
             0xBB,
             vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
-            &g.balances,
-            &g.nonces,
+            &ancestor_state.balances,
+            &ancestor_state.nonces,
         );
+        let branch_1_state = state_after_block(&ancestor_state, &branch_1);
         let branch_2 = no_op_valid_block(
             branch_1.hash(),
             3,
             branch_1.header.timestamp + TARGET_BLOCK_TIME,
             0xBC,
-            &g.balances,
-            &g.nonces,
+            &branch_1_state.balances,
+            &branch_1_state.nonces,
         );
 
         let _ = reconstruct_branch_state(
-            &g,
             ancestor.hash(),
             &ancestor_state,
             &[branch_1, branch_2],
@@ -622,7 +679,6 @@ mod tests {
         );
 
         let result = reconstruct_branch_state(
-            &g,
             ancestor.hash(),
             &ancestor_state,
             &[bad_branch],
@@ -649,7 +705,7 @@ mod tests {
         assert_eq!(cumulative_work(&g, tip.hash()), expected);
     }
 
-    // â”€â”€ try_reorg â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── try_reorg ─────────────────────────────────────────────────────────────
 
     /// Fork at genesis: two competing b1 candidates.
     /// The heavier one (after try_reorg is called from apply_block) wins.
@@ -661,7 +717,7 @@ mod tests {
 
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
 
-        // b1 extends genesis â€” canonical.
+        // b1 extends genesis — canonical.
         let b1 = make_test_block(gen.hash(), 1, ts, 0xAA);
         apply_block(&mut g, &b1, None);
         assert_eq!(g.tip_hash(), b1.hash());
@@ -672,7 +728,7 @@ mod tests {
         // b1p alone doesn't have more work, so canonical should still be b1.
         assert_eq!(g.tip_hash(), b1.hash(), "b1p alone must not dislodge b1");
 
-        // b2p extends b1p â€” now the b1p chain is longer (and heavier).
+        // b2p extends b1p — now the b1p chain is longer (and heavier).
         let ts2 = ts + TARGET_BLOCK_TIME;
         let b2p = make_test_block(b1p.hash(), 2, ts2, 0xCC);
         // Manually insert b2p as side block so try_reorg can find its ancestry.
@@ -696,7 +752,6 @@ mod tests {
                 "demoted b1 should be in side_blocks");
         }
     }
-
     #[test]
     fn reorg_respects_max_reorg_depth() {
         // Build a chain of MAX_REORG + 2 blocks.
@@ -723,13 +778,92 @@ mod tests {
         let (mut g, blocks) = build_chain(2);
         let tip = blocks.last().unwrap();
 
-        // A block that points to an unknown parent â€” ancestry chain broken.
+        // A block that points to an unknown parent — ancestry chain broken.
         let unknown_parent = "dead".repeat(16);
         let orphan = make_test_block(&unknown_parent, 99, tip.header.timestamp + 30, 0xDD);
         g.side_blocks.insert(orphan.hash().to_string(), orphan.clone());
 
         let result = try_reorg(&mut g, &orphan);
         assert!(!result, "reorg with broken ancestry must fail");
+    }
+
+    #[test]
+    fn reorg_replay_rejects_invalid_transaction_without_mutation() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
+        let canon = no_op_valid_block(gen.hash(), 1, ts, 0xAA, &g.balances, &g.nonces);
+        apply_block(&mut g, &canon, None);
+
+        let before_tip = g.tip_hash();
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let side1 = no_op_valid_block(gen.hash(), 1, ts, 0xAB, &g.balances, &g.nonces);
+        let mut side2 = branch_block(
+            side1.hash(),
+            2,
+            ts + TARGET_BLOCK_TIME,
+            0xAC,
+            vec![signed_transfer_tx(
+                7,
+                0,
+                &hex::encode(signing_key(8).verifying_key().to_bytes()),
+                1,
+                1,
+            )],
+            &g.balances,
+            &g.nonces,
+        );
+        side2.txs[1].nonce = 1;
+        rehash_block(&mut side2);
+
+        g.side_blocks.insert(side1.hash().to_string(), side1.clone());
+        g.side_blocks.insert(side2.hash().to_string(), side2.clone());
+
+        let reorged = try_reorg(&mut g, &side2);
+        assert!(!reorged, "reorg must reject invalid replay transaction");
+        assert_eq!(g.tip_hash(), before_tip);
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
+    #[test]
+    fn reorg_replay_rejects_invalid_state_root_without_mutation() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
+        let canon = no_op_valid_block(gen.hash(), 1, ts, 0xAA, &g.balances, &g.nonces);
+        apply_block(&mut g, &canon, None);
+
+        let before_tip = g.tip_hash();
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let side1 = no_op_valid_block(gen.hash(), 1, ts, 0xAB, &g.balances, &g.nonces);
+        let mut side2 = no_op_valid_block(
+            side1.hash(),
+            2,
+            ts + TARGET_BLOCK_TIME,
+            0xAC,
+            &g.balances,
+            &g.nonces,
+        );
+        side2.header.state_root = "11".repeat(32);
+        rehash_block(&mut side2);
+
+        g.side_blocks.insert(side1.hash().to_string(), side1.clone());
+        g.side_blocks.insert(side2.hash().to_string(), side2.clone());
+
+        let reorged = try_reorg(&mut g, &side2);
+        assert!(!reorged, "reorg must reject invalid replay state root");
+        assert_eq!(g.tip_hash(), before_tip);
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
     }
 
     #[test]
@@ -740,14 +874,14 @@ mod tests {
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
         let ts2 = ts + TARGET_BLOCK_TIME;
 
-        // Build canonical: gen â†’ b1 â†’ b2
+        // Build canonical: gen → b1 → b2
         let b1 = make_test_block(gen.hash(), 1, ts, 0xAA);
         let b2 = make_test_block(b1.hash(), 2, ts2, 0xBB);
         apply_block(&mut g, &b1, None);
         apply_block(&mut g, &b2, None);
         assert_eq!(g.current_height(), 2);
 
-        // Build a heavier fork: gen â†’ c1 â†’ c2 â†’ c3
+        // Build a heavier fork: gen → c1 → c2 → c3
         let c1 = make_test_block(gen.hash(), 1, ts, 0xCC);
         let c2 = make_test_block(c1.hash(), 2, ts2, 0xDD);
         let ts3 = ts2 + TARGET_BLOCK_TIME;
@@ -760,8 +894,8 @@ mod tests {
             g.side_blocks.insert(blk.hash().to_string(), blk.clone());
             g.cumulative_work.insert(blk.hash().to_string(), cw);
             g.seen_blocks.insert(blk.hash().to_string());
-        }
 
+        }
         let reorged = try_reorg(&mut g, &c3);
         assert!(reorged, "should reorg to longer chain");
         assert_eq!(g.tip_hash(), c3.hash());
@@ -770,6 +904,10 @@ mod tests {
         assert!(g.side_blocks.contains_key(b2.hash()));
     }
 }
+
+
+
+
 
 
 
