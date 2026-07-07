@@ -1,4 +1,5 @@
-use crate::chain::ChainState;
+﻿use crate::chain::ChainState;
+use crate::types::transaction::canonical_tx_id;
 use crate::types::Block;
 use crate::config::constants::ORPHAN_POOL_MAX;
 
@@ -85,7 +86,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -125,7 +126,7 @@ mod tests {
         let tx_root = {
             let mut h = blake3::Hasher::new();
             for tx in &txs {
-                h.update(tx.tx_id().as_bytes());
+                h.update(canonical_tx_id(tx).as_bytes());
             }
             hex::encode(h.finalize().as_bytes())
         };
@@ -171,7 +172,7 @@ mod tests {
         let b1 = make_test_block(gen.hash(), 1, ts1, 0xAA);
         let b2 = make_test_block(b1.hash(), 2, ts2, 0xBB);
 
-        // b2 arrives first — stored as orphan.
+        // b2 arrives first â€” stored as orphan.
         add_orphan(&mut g, b2.clone(), "peer1");
         assert_eq!(g.orphan_pool.len(), 1);
 
@@ -200,7 +201,7 @@ mod tests {
         let total: usize = g.orphan_pool.values().map(|v| v.len()).sum();
         assert!(
             total <= ORPHAN_POOL_MAX,
-            "pool size {} should be ≤ {}",
+            "pool size {} should be â‰¤ {}",
             total, ORPHAN_POOL_MAX
         );
     }
@@ -231,4 +232,7 @@ mod tests {
         assert!(!g.orphan_by_hash.contains_key(&b1_hash));
     }
 }
+
+
+
 

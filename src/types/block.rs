@@ -1,10 +1,11 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
+use crate::types::transaction::canonical_tx_id;
 use crate::types::{BlockHeader, Tx};
 
 /// A complete block: header + ordered transactions + serialised weight.
 ///
-/// All blocks — whether received from peers, produced locally, or loaded
-/// from storage — use this single representation. There is no alternate
+/// All blocks â€” whether received from peers, produced locally, or loaded
+/// from storage â€” use this single representation. There is no alternate
 /// block type in the codebase.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Block {
@@ -20,7 +21,7 @@ pub struct Block {
 }
 
 impl Block {
-    /// Canonical block hash — the hex-encoded PoW hash from the header.
+    /// Canonical block hash â€” the hex-encoded PoW hash from the header.
     #[inline]
     pub fn hash(&self) -> &str {
         &self.header.pow_hash
@@ -34,7 +35,7 @@ impl Block {
 
     /// Compute the tx_root from the included transactions.
     ///
-    /// Feeds each `tx.tx_id()` into a blake3 hasher in order. Returns
+    /// Feeds each `canonical_tx_id(tx)` into a blake3 hasher in order. Returns
     /// the null hash (`"00...00"`, 64 chars) for an empty block.
     /// The block's `header.tx_root` must equal this value for the block
     /// to be considered internally consistent.
@@ -44,7 +45,7 @@ impl Block {
         }
         let mut hasher = blake3::Hasher::new();
         for tx in &self.txs {
-            hasher.update(tx.tx_id().as_bytes());
+            hasher.update(canonical_tx_id(tx).as_bytes());
         }
         hex::encode(hasher.finalize().as_bytes())
     }
@@ -111,3 +112,5 @@ mod tests {
         assert_ne!(root_empty, root_with_tx);
     }
 }
+
+

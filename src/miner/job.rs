@@ -1,8 +1,9 @@
-use crate::config::constants::{BLOCK_TARGET_TXS, EMISSION_PER_BLOCK, HALVING_INTERVAL};
+﻿use crate::config::constants::{BLOCK_TARGET_TXS, EMISSION_PER_BLOCK, HALVING_INTERVAL};
 use crate::pow::difficulty::{calculate_next_difficulty, difficulty_to_target};
 use crate::pow::historical_vpow::HISTORICAL_VPOW_NONCE_OFFSET;
 use crate::pow::visionx::{VisionXParams, VISIONX_PARAMS};
 use crate::pow::VisionXMiner;
+use crate::types::transaction::canonical_tx_id;
 use crate::types::{Block, BlockHeader, Tx};
 
 fn decode_hash_32(s: &str) -> Result<[u8; 32], String> {
@@ -150,7 +151,7 @@ pub(crate) fn build_candidate_with_params(
     let tx_root = {
         let mut h = blake3::Hasher::new();
         for tx in &txs {
-            h.update(tx.tx_id().as_bytes());
+            h.update(canonical_tx_id(tx).as_bytes());
         }
         hex::encode(h.finalize().as_bytes())
     };
@@ -292,7 +293,7 @@ mod tests {
         let expected = {
             let mut h = blake3::Hasher::new();
             for tx in &job.txs {
-                h.update(tx.tx_id().as_bytes());
+                h.update(canonical_tx_id(tx).as_bytes());
             }
             hex::encode(h.finalize().as_bytes())
         };
@@ -327,7 +328,7 @@ mod tests {
     }
     #[test]
     fn try_nonce_wrong_returns_none_at_max_difficulty() {
-        // At u64::MAX difficulty the target is effectively zero — no hash passes.
+        // At u64::MAX difficulty the target is effectively zero â€” no hash passes.
         let tip = genesis_tip();
         let now = tip.header.timestamp + TARGET_BLOCK_TIME;
         let mut job = build_candidate_with_params(
@@ -435,7 +436,7 @@ mod tests {
         let job = build_candidate(&tip, 1, "miner1", extra, &simple_window(&tip), now);
         assert!(
             job.txs.len() <= BLOCK_TARGET_TXS,
-            "txs.len()={} should be ≤ BLOCK_TARGET_TXS={}",
+            "txs.len()={} should be â‰¤ BLOCK_TARGET_TXS={}",
             job.txs.len(),
             BLOCK_TARGET_TXS
         );
@@ -458,3 +459,6 @@ mod tests {
         assert_eq!(job.header_template.parent_hash, b1.hash());
     }
 }
+
+
+

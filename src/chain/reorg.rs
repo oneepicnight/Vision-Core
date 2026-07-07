@@ -1,7 +1,7 @@
 ﻿use crate::chain::ChainState;
 use crate::config::constants::MAX_REORG;
 use crate::types::Block;
-use crate::types::transaction::{simulate_tx_execution, TxExecutionError, TxExecutionState};
+use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionError, TxExecutionState};
 
 // â”€â”€â”€ Chain-select helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -243,7 +243,7 @@ mod tests {
     fn recompute_tx_root(txs: &[Tx]) -> String {
         let mut h = blake3::Hasher::new();
         for tx in txs {
-            h.update(tx.tx_id().as_bytes());
+            h.update(canonical_tx_id(tx).as_bytes());
         }
         hex::encode(h.finalize().as_bytes())
     }
@@ -770,6 +770,8 @@ mod tests {
         assert!(g.side_blocks.contains_key(b2.hash()));
     }
 }
+
+
 
 
 
