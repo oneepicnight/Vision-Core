@@ -19,7 +19,7 @@ pub async fn start_services(
 ) -> Result<()> {
     // ── P2P listener ──────────────────────────────────────────────────────────
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
-    let conn_mgr = Arc::new(P2PConnectionManager::new(p2p_addr));
+    let conn_mgr = Arc::new(P2PConnectionManager::new(p2p_addr, chain.clone(), peer_manager.clone()));
     {
         let mgr = conn_mgr.clone();
         tokio::spawn(async move {
@@ -57,3 +57,4 @@ pub async fn start_services(
     tracing::info!("[NODE] All services started");
     Ok(())
 }
+

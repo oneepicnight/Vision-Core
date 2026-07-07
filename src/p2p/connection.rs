@@ -1,9 +1,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use anyhow::Result;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+
+use crate::chain::state::ChainState;
 use crate::p2p::messages::P2PMessage;
+use crate::p2p::peer_manager::{PeerManager, PeerState};
+use crate::p2p::protocol::{validate_handshake, HandshakeMessage, HandshakeResult};
 
 /// Maximum wire message size: 16 MiB.
 ///
@@ -11,7 +17,7 @@ use crate::p2p::messages::P2PMessage;
 /// memory exhaustion attacks from malicious peers.
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
 
-// ─── Wire framing ─────────────────────────────────────────────────────────────
+// --- Wire framing -----------------------------------------------------------
 //
 // Format: [ u32 big-endian length ][ bincode-encoded P2PMessage ]
 //
@@ -51,7 +57,7 @@ where
     Ok(bincode::deserialize(&buf)?)
 }
 
-// ─── Connection manager ───────────────────────────────────────────────────────
+// --- Connection manager -----------------------------------------------------
 
 /// Manages inbound TCP P2P connections.
 ///
@@ -61,11 +67,24 @@ where
 pub struct P2PConnectionManager {
     /// Local bind address.
     pub listen_addr: SocketAddr,
+    chain: Arc<Mutex<ChainState>>,
+    peer_manager: Arc<PeerManager>,
+    local_node_nonce: u64,
 }
 
 impl P2PConnectionManager {
-    pub fn new(listen_addr: SocketAddr) -> Self {
-        Self { listen_addr }
+    pub fn new(
+        listen_addr: SocketAddr,
+        chain: Arc<Mutex<ChainState>>,
+        peer_manager: Arc<PeerManager>,
+    ) -> Self {
+        let local_node_nonce = derive_local_node_nonce(listen_addr);
+        Self {
+            listen_addr,
+            chain,
+            peer_manager,
+            local_node_nonce,
+        }
     }
 
     /// Accept inbound connections in a loop, spawning one task per connection.
@@ -77,7 +96,12 @@ impl P2PConnectionManager {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     tracing::debug!("[P2P] inbound from {}", addr);
-                    tokio::spawn(handle_inbound(stream, addr));
+                    let chain = self.chain.clone();
+                    let peer_manager = self.peer_manager.clone();
+                    let local_node_nonce = self.local_node_nonce;
+                    tokio::spawn(async move {
+                        handle_inbound(stream, addr, chain, peer_manager, local_node_nonce).await;
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("[P2P] accept error: {}", e);
@@ -94,47 +118,119 @@ impl P2PConnectionManager {
     }
 }
 
-// ─── Inbound message dispatch ─────────────────────────────────────────────────
+// --- Inbound message dispatch -----------------------------------------------
+
+fn derive_local_node_nonce(listen_addr: SocketAddr) -> u64 {
+    let mut input = Vec::new();
+    input.extend_from_slice(listen_addr.to_string().as_bytes());
+    input.extend_from_slice(crate::genesis::genesis::GENESIS_HASH.as_bytes());
+    input.extend_from_slice(crate::config::constants::NETWORK_ID.as_bytes());
+    let hash = blake3::hash(&input);
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&hash.as_bytes()[..8]);
+    u64::from_be_bytes(bytes)
+}
+
+fn handshake_reject_reason(result: &HandshakeResult) -> String {
+    match result {
+        HandshakeResult::VersionMismatch { remote, ours } => {
+            format!("unsupported protocol version: remote={} ours={}", remote, ours)
+        }
+        HandshakeResult::WrongChainId => "wrong chain identity".to_string(),
+        HandshakeResult::WrongGenesisHash => "wrong genesis hash".to_string(),
+        HandshakeResult::WrongEconHash => "wrong economic version".to_string(),
+        HandshakeResult::WrongPowParams => "wrong pow/consensus version".to_string(),
+        HandshakeResult::SelfConnection => "self-connection rejected".to_string(),
+        HandshakeResult::Accepted => "handshake accepted".to_string(),
+    }
+}
 
 /// Handle an accepted inbound connection.
 ///
-/// Reads messages in a loop, logging each one by its label. All processing
-/// past the handshake is deferred to future work items (sync, mempool relay,
-/// etc.).  The connection is closed on any I/O or decode error.
-async fn handle_inbound(mut stream: TcpStream, addr: SocketAddr) {
+/// Reads messages in a loop, logging each one by its label. The connection
+/// must complete a valid handshake before any other message is accepted.
+async fn handle_inbound<S>(
+    mut stream: S,
+    addr: SocketAddr,
+    chain: Arc<Mutex<ChainState>>,
+    peer_manager: Arc<PeerManager>,
+    local_node_nonce: u64,
+) where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let mut handshake_done = false;
 
     loop {
         match recv_message(&mut stream).await {
             Ok(msg) => {
-                // Before handshake: only Handshake or Disconnect are legal.
                 if !handshake_done && !msg.is_pre_handshake() {
-                    tracing::warn!("[P2P] {} sent {} before handshake — closing", addr, msg.label());
+                    tracing::warn!(
+                        "[P2P] {} sent {} before handshake - closing",
+                        addr,
+                        msg.label()
+                    );
                     break;
                 }
 
-                tracing::trace!("[P2P] ← {} {}", addr, msg.label());
+                tracing::trace!("[P2P] <- {} {}", addr, msg.label());
 
                 match msg {
-                    P2PMessage::Handshake(_h) => {
-                        // TODO: call validate_handshake, send our own Handshake back.
-                        handshake_done = true;
+                    P2PMessage::Handshake(remote_hs) => {
+                        if handshake_done {
+                            tracing::warn!("[P2P] {} sent duplicate handshake - closing", addr);
+                            break;
+                        }
+
+                        let our_height = chain.lock().await.current_height();
+                        let local_hs = HandshakeMessage::new(our_height, local_node_nonce);
+                        let validation = validate_handshake(&remote_hs, local_node_nonce);
+
+                        match validation {
+                            HandshakeResult::Accepted => {
+                                peer_manager.upsert(&addr.to_string(), false);
+                                peer_manager.set_state(&addr.to_string(), PeerState::Connected);
+                                if let Err(e) = send_message(&mut stream, &P2PMessage::Handshake(local_hs)).await {
+                                    tracing::warn!("[P2P] {} handshake send error: {}", addr, e);
+                                    break;
+                                }
+                                tracing::trace!("[P2P] -> {} Handshake accepted", addr);
+                                handshake_done = true;
+                            }
+                            other => {
+                                peer_manager.upsert(&addr.to_string(), false);
+                                peer_manager.set_state(&addr.to_string(), PeerState::Disconnected);
+                                let disconnect = P2PMessage::Disconnect {
+                                    reason: handshake_reject_reason(&other),
+                                };
+                                if let Err(e) = send_message(&mut stream, &disconnect).await {
+                                    tracing::warn!("[P2P] {} disconnect send error: {}", addr, e);
+                                }
+                                tracing::debug!("[P2P] {} handshake rejected: {:?}", addr, other);
+                                break;
+                            }
+                        }
                     }
                     P2PMessage::Ping { timestamp } => {
+                        if !handshake_done {
+                            tracing::warn!("[P2P] {} ping before handshake - closing", addr);
+                            break;
+                        }
                         let pong = P2PMessage::Pong { timestamp };
                         if let Err(e) = send_message(&mut stream, &pong).await {
                             tracing::warn!("[P2P] {} pong send error: {}", addr, e);
                             break;
                         }
-                        tracing::trace!("[P2P] → {} Pong", addr);
+                        tracing::trace!("[P2P] -> {} Pong", addr);
                     }
                     P2PMessage::Disconnect { reason } => {
                         tracing::debug!("[P2P] {} disconnected: {}", addr, reason);
                         break;
                     }
-                    // All other messages are logged and ignored until the sync
-                    // layer is wired in (Prompt 10).
                     other => {
+                        if !handshake_done {
+                            tracing::warn!("[P2P] {} sent {} before handshake - closing", addr, other.label());
+                            break;
+                        }
                         tracing::debug!("[P2P] {} {} (unhandled)", addr, other.label());
                     }
                 }
@@ -147,14 +243,15 @@ async fn handle_inbound(mut stream: TcpStream, addr: SocketAddr) {
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::protocol::{AnnounceBlock, HandshakeMessage};
     use crate::genesis::genesis_block;
+    use crate::p2p::protocol::AnnounceBlock;
     use tokio::io::duplex;
+    use tokio::time::{timeout, Duration};
 
     // Helper: send `msg` from one half of a duplex, recv from the other.
     async fn wire_rt(msg: P2PMessage) -> P2PMessage {
@@ -163,7 +260,30 @@ mod tests {
         recv_message(&mut rx).await.expect("recv")
     }
 
-    // ── framing round-trips ───────────────────────────────────────────────────
+    fn temp_chain() -> Arc<Mutex<ChainState>> {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        Arc::new(Mutex::new(ChainState::empty(db)))
+    }
+
+    fn temp_peer_manager() -> Arc<PeerManager> {
+        Arc::new(PeerManager::new())
+    }
+
+    fn local_nonce_for(addr: SocketAddr) -> u64 {
+        derive_local_node_nonce(addr)
+    }
+
+    fn accepted_handshake_response(reply: P2PMessage, expected_nonce: u64) -> HandshakeMessage {
+        match reply {
+            P2PMessage::Handshake(hs) => {
+                assert_eq!(hs.node_nonce, expected_nonce);
+                hs
+            }
+            other => panic!("expected handshake response, got {:?}", other),
+        }
+    }
+
+    // -- framing round-trips -------------------------------------------------
 
     #[tokio::test]
     async fn ping_frames_correctly() {
@@ -247,12 +367,11 @@ mod tests {
         }
     }
 
-    // ── framing safety ────────────────────────────────────────────────────────
+    // -- framing safety ------------------------------------------------------
 
     #[tokio::test]
     async fn oversized_message_is_rejected() {
         let (mut tx, mut rx) = duplex(64 * 1024);
-        // Write a length prefix that exceeds MAX_MESSAGE_BYTES.
         let huge_len: u32 = MAX_MESSAGE_BYTES + 1;
         tx.write_all(&huge_len.to_be_bytes()).await.unwrap();
         let err = recv_message(&mut rx).await;
@@ -271,5 +390,199 @@ mod tests {
         assert!(matches!(recv_message(&mut rx).await.unwrap(), P2PMessage::Ping { timestamp: 1 }));
         assert!(matches!(recv_message(&mut rx).await.unwrap(), P2PMessage::GetHeight));
         assert!(matches!(recv_message(&mut rx).await.unwrap(), P2PMessage::Pong { timestamp: 2 }));
+    }
+
+    // -- handshake validation wiring ----------------------------------------
+
+    #[tokio::test]
+    async fn inbound_handshake_accepts_and_allows_followup_messages() {
+        let addr: SocketAddr = "127.0.0.1:19001".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain.clone(),
+            peer_manager.clone(),
+            local_nonce,
+        ));
+
+        let remote = HandshakeMessage::new(0, local_nonce + 1);
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        let reply = recv_message(&mut client).await.unwrap();
+        let local_hs = accepted_handshake_response(reply, local_nonce);
+        assert_eq!(local_hs.protocol_version, crate::config::constants::PROTOCOL_VERSION);
+
+        send_message(&mut client, &P2PMessage::Ping { timestamp: 42 }).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Pong { timestamp } => assert_eq!(timestamp, 42),
+            other => panic!("expected pong, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        assert_eq!(peer_manager.connected_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_rejects_wrong_chain_id() {
+        let addr: SocketAddr = "127.0.0.1:19002".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        let mut remote = HandshakeMessage::new(0, local_nonce + 1);
+        remote.chain_id = [0xAA; 32];
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Disconnect { reason } => {
+                assert_eq!(reason, "wrong chain identity");
+            }
+            other => panic!("expected disconnect, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_rejects_wrong_genesis_hash() {
+        let addr: SocketAddr = "127.0.0.1:19003".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        let mut remote = HandshakeMessage::new(0, local_nonce + 1);
+        remote.genesis_hash = "00".repeat(32);
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Disconnect { reason } => {
+                assert_eq!(reason, "wrong genesis hash");
+            }
+            other => panic!("expected disconnect, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_rejects_wrong_economic_version() {
+        let addr: SocketAddr = "127.0.0.1:19004".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        let mut remote = HandshakeMessage::new(0, local_nonce + 1);
+        remote.econ_hash = "bad".repeat(16);
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Disconnect { reason } => {
+                assert_eq!(reason, "wrong economic version");
+            }
+            other => panic!("expected disconnect, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_rejects_wrong_pow_version() {
+        let addr: SocketAddr = "127.0.0.1:19005".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        let mut remote = HandshakeMessage::new(0, local_nonce + 1);
+        remote.pow_params_hash = "bad".repeat(16);
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Disconnect { reason } => {
+                assert_eq!(reason, "wrong pow/consensus version");
+            }
+            other => panic!("expected disconnect, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_rejects_unsupported_protocol_version() {
+        let addr: SocketAddr = "127.0.0.1:19006".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        let mut remote = HandshakeMessage::new(0, local_nonce + 1);
+        remote.protocol_version = crate::config::constants::PROTOCOL_VERSION + 1;
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Disconnect { reason } => {
+                assert_eq!(
+                    reason,
+                    format!(
+                        "unsupported protocol version: remote={} ours={}",
+                        crate::config::constants::PROTOCOL_VERSION + 1,
+                        crate::config::constants::PROTOCOL_VERSION
+                    )
+                );
+            }
+            other => panic!("expected disconnect, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_rejects_self_connection() {
+        let addr: SocketAddr = "127.0.0.1:19007".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        let remote = HandshakeMessage::new(0, local_nonce);
+        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::Disconnect { reason } => {
+                assert_eq!(reason, "self-connection rejected");
+            }
+            other => panic!("expected disconnect, got {:?}", other),
+        }
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_handshake_does_not_panic() {
+        let addr: SocketAddr = "127.0.0.1:19008".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+
+        client.write_all(&4u32.to_be_bytes()).await.unwrap();
+        client.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
+        drop(client);
+
+        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
     }
 }
