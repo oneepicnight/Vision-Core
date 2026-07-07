@@ -1,4 +1,4 @@
-use axum::{body::Bytes, extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+﻿use axum::{body::Bytes, extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
 use serde::Serialize;
 
 use crate::api::state::NodeApiState;
@@ -755,6 +755,33 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn duplicate_transaction_flood_does_not_mutate_chain_or_mempool() {
+        let chain = Arc::new(Mutex::new(temp_state()));
+        let mempool = Arc::new(Mempool::new());
+        let state = NodeApiState::new(chain.clone(), mempool.clone());
+        let tx = signed_transfer_tx(1, 0, 2);
+        let tx_json = serde_json::to_string(&tx).unwrap();
+        let tx_id = canonical_tx_id(&tx);
+
+        let before = {
+            let chain_guard = chain.lock().await;
+            (chain_guard.balances.clone(), chain_guard.nonces.clone())
+        };
+
+        for _ in 0..8 {
+            let _ = submit_json(state.clone(), &tx_json).await;
+        }
+
+        let after = {
+            let chain_guard = chain.lock().await;
+            (chain_guard.balances.clone(), chain_guard.nonces.clone())
+        };
+
+        assert_eq!(after, before);
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.has(&tx_id));
+    }
+    #[tokio::test]
     async fn response_schema_is_stable_for_accepted_and_rejected_results() {
         let chain = Arc::new(Mutex::new(temp_state()));
         let mempool = Arc::new(Mempool::new());
@@ -853,5 +880,10 @@ mod http_state_tests {
         assert_eq!(after, before);
     }
 }
+
+
+
+
+
 
 

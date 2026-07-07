@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+﻿use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -227,7 +227,17 @@ mod tests {
         blocks
     }
 
-    async fn spawn_mock_peer(blocks: Vec<Block>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    #[derive(Clone)]
+    enum BlockReply {
+        Matching,
+        Specific(Block),
+        MalformedFrame,
+        Disconnect,
+    }
+    async fn spawn_scripted_peer(
+        blocks: Vec<Block>,
+        replies: Vec<BlockReply>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -246,6 +256,7 @@ mod tests {
             for block in blocks {
                 by_hash.insert(block.hash().to_string(), block);
             }
+            let mut replies = VecDeque::from(replies);
 
             loop {
                 match recv_message(&mut stream).await {
@@ -253,8 +264,26 @@ mod tests {
                         send_message(&mut stream, &P2PMessage::Height { height: tip_height, tip_hash: tip_hash.clone() }).await.unwrap();
                     }
                     Ok(P2PMessage::GetBlock { hash }) => {
-                        let block = by_hash.get(&hash).cloned().unwrap_or_else(|| panic!("missing block {}", hash));
-                        send_message(&mut stream, &P2PMessage::Block { block }).await.unwrap();
+                        match replies.pop_front().unwrap_or(BlockReply::Matching) {
+                            BlockReply::Matching => {
+                                if let Some(block) = by_hash.get(&hash).cloned() {
+                                    send_message(&mut stream, &P2PMessage::Block { block }).await.unwrap();
+                                } else {
+                                    break;
+                                }
+                            }
+                            BlockReply::Specific(block) => {
+                                send_message(&mut stream, &P2PMessage::Block { block }).await.unwrap();
+                            }
+                            BlockReply::MalformedFrame => {
+                                stream.write_all(&4u32.to_be_bytes()).await.unwrap();
+                                stream.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
+                                break;
+                            }
+                            BlockReply::Disconnect => {
+                                break;
+                            }
+                        }
                     }
                     Ok(P2PMessage::Disconnect { .. }) | Err(_) => break,
                     Ok(other) => panic!("unexpected message {:?}", other),
@@ -262,6 +291,18 @@ mod tests {
             }
         });
         (addr, handle)
+    }
+
+    async fn spawn_mock_peer(blocks: Vec<Block>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_scripted_peer(blocks, vec![]).await
+    }
+
+    fn seeded_chain(blocks: &[Block]) -> ChainState {
+        let mut local_chain = temp_state();
+        let gen = genesis_block();
+        assert!(matches!(apply_block(&mut local_chain, &gen, None), AcceptResult::CanonExtension { height: 0 }));
+        assert!(matches!(apply_block(&mut local_chain, &blocks[0], None), AcceptResult::CanonExtension { height: 1 }));
+        local_chain
     }
 
     #[test]
@@ -308,11 +349,7 @@ mod tests {
         let remote_blocks = build_blocks(6, None);
         let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
 
-        let mut local_chain = temp_state();
-        let gen = genesis_block();
-        assert!(matches!(apply_block(&mut local_chain, &gen, None), AcceptResult::CanonExtension { height: 0 }));
-        assert!(matches!(apply_block(&mut local_chain, &remote_blocks[0], None), AcceptResult::CanonExtension { height: 1 }));
-
+        let local_chain = seeded_chain(&remote_blocks);
         let chain = Arc::new(Mutex::new(local_chain));
         let pm = Arc::new(PeerManager::new());
         let peer = peer_addr.to_string();
@@ -338,11 +375,7 @@ mod tests {
         let remote_blocks = build_blocks(6, Some(2));
         let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
 
-        let mut local_chain = temp_state();
-        let gen = genesis_block();
-        assert!(matches!(apply_block(&mut local_chain, &gen, None), AcceptResult::CanonExtension { height: 0 }));
-        assert!(matches!(apply_block(&mut local_chain, &remote_blocks[0], None), AcceptResult::CanonExtension { height: 1 }));
-
+        let local_chain = seeded_chain(&remote_blocks);
         let chain = Arc::new(Mutex::new(local_chain));
         let pm = Arc::new(PeerManager::new());
         let peer = peer_addr.to_string();
@@ -362,4 +395,214 @@ mod tests {
 
         peer_task.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn watchdog_rejects_invalid_pow_block_and_leaves_tip_unchanged() {
+        let mut remote_blocks = build_blocks(6, None);
+        remote_blocks[1].header.pow_hash = "ff".repeat(32);
+        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19103".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(result.is_err());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_rejects_invalid_state_root_block_and_leaves_tip_unchanged() {
+        let remote_blocks = build_blocks(6, Some(2));
+        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19104".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(result.is_err());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_rejects_invalid_tx_root_block_and_leaves_tip_unchanged() {
+        let mut remote_blocks = build_blocks(6, None);
+        remote_blocks[1].header.tx_root = "00".repeat(32);
+        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19105".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(result.is_err());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_rejects_malformed_block_frame_and_leaves_tip_unchanged() {
+        let remote_blocks = build_blocks(6, None);
+        let (peer_addr, peer_task) = spawn_scripted_peer(remote_blocks.clone(), vec![BlockReply::MalformedFrame]).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19106".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(result.is_err());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_rejects_duplicate_block_replay_and_leaves_tip_unchanged() {
+        let remote_blocks = build_blocks(6, None);
+        let replay_block = remote_blocks[5].clone();
+        let (peer_addr, peer_task) = spawn_scripted_peer(
+            remote_blocks.clone(),
+            vec![BlockReply::Matching, BlockReply::Specific(replay_block)],
+        )
+        .await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19107".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(result.is_err());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_handles_disconnect_during_block_transfer() {
+        let remote_blocks = build_blocks(6, None);
+        let (peer_addr, peer_task) = spawn_scripted_peer(remote_blocks.clone(), vec![BlockReply::Disconnect]).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19108".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(result.is_err());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_recovers_with_valid_peer_after_malicious_peer_fails() {
+        let mut malicious_blocks = build_blocks(6, None);
+        malicious_blocks[1].header.state_root = "ff".repeat(32);
+        let (malicious_addr, malicious_task) = spawn_mock_peer(malicious_blocks.clone()).await;
+        let valid_blocks = build_blocks(6, None);
+        let (valid_addr, valid_task) = spawn_mock_peer(valid_blocks.clone()).await;
+
+        let local_chain = seeded_chain(&valid_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+
+        let malicious_peer = malicious_addr.to_string();
+        pm.upsert(&malicious_peer, true);
+        pm.set_state(&malicious_peer, PeerState::Connected);
+        pm.note_peer_height(&malicious_peer, 6, false);
+
+        let valid_peer = valid_addr.to_string();
+        pm.upsert(&valid_peer, true);
+        pm.set_state(&valid_peer, PeerState::Connected);
+        pm.note_peer_height(&valid_peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19109".parse().unwrap(), chain.clone(), pm.clone());
+        let mut guard = SyncGuard::new();
+
+        let first = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(first.is_err());
+
+        guard.reset();
+        pm.set_state(&malicious_peer, PeerState::Disconnected);
+        pm.note_peer_height(&valid_peer, 6, false);
+
+        let second = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        assert!(second.is_ok());
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 6);
+        assert_eq!(g.tip_hash(), valid_blocks.last().unwrap().hash());
+        drop(g);
+
+        malicious_task.await.unwrap();
+        valid_task.await.unwrap();
+    }
 }
+
+
+
