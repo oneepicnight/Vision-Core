@@ -332,6 +332,40 @@ mod tests {
         balances
     }
 
+    async fn sync_node_to_peer(node: &NodeHarness, peer_addr: &str, reported_height: u64) -> Result<()> {
+        node.peer_manager.upsert(peer_addr, true);
+        node.peer_manager.set_state(peer_addr, PeerState::Connected);
+        node.peer_manager.note_peer_height(peer_addr, reported_height, false);
+
+        let mut guard = SyncGuard::new();
+        timeout(
+            Duration::from_secs(15),
+            watchdog_step(
+                node.conn_mgr.as_ref(),
+                &node.chain,
+                node.peer_manager.as_ref(),
+                &mut guard,
+            ),
+        )
+        .await
+        .unwrap()?;
+
+        Ok(())
+    }
+
+    async fn node_snapshot(node: &NodeHarness, sender: &str, recipient: &str) -> (u64, String, String, String, u128, u128, u64) {
+        let guard = node.chain.lock().await;
+        let tip = guard.blocks.last().unwrap();
+        (
+            guard.current_height(),
+            guard.tip_hash(),
+            tip.header.tx_root.clone(),
+            tip.header.state_root.clone(),
+            guard.balance_of(sender),
+            guard.balance_of(recipient),
+            guard.nonce_of(sender),
+        )
+    }
     #[tokio::test]
     async fn two_node_local_testnet_catches_up_over_tcp() -> Result<()> {
         let miner = start_node(true).await?;
@@ -472,6 +506,128 @@ mod tests {
         stop_node(follower).await;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn three_node_local_testnet_converges_with_reconnect() -> Result<()> {
+        let miner = start_node(true).await?;
+        let follower_b = start_node(false).await?;
+        let follower_c = start_node(false).await?;
+
+        assert_ne!(miner.addr, follower_b.addr);
+        assert_ne!(miner.addr, follower_c.addr);
+        assert_ne!(follower_b.addr, follower_c.addr);
+        assert_ne!(miner.data_dir.path(), follower_b.data_dir.path());
+        assert_ne!(miner.data_dir.path(), follower_c.data_dir.path());
+        assert_ne!(follower_b.data_dir.path(), follower_c.data_dir.path());
+
+        let sender_key = signing_key(21);
+        let sender = hex::encode(sender_key.verifying_key().to_bytes());
+        let recipient = hex::encode(signing_key(22).verifying_key().to_bytes());
+        let balances = mine_state_keys(&sender, &recipient);
+        for node in [&miner, &follower_b, &follower_c] {
+            let mut chain = node.chain.lock().await;
+            chain.balances = balances.clone();
+            chain.nonces.insert(sender.clone(), 0);
+        }
+
+        let miner_genesis = { miner.chain.lock().await.block_at(0).unwrap().hash().to_string() };
+        let follower_b_genesis = { follower_b.chain.lock().await.block_at(0).unwrap().hash().to_string() };
+        let follower_c_genesis = { follower_c.chain.lock().await.block_at(0).unwrap().hash().to_string() };
+        assert_eq!(miner_genesis, follower_b_genesis);
+        assert_eq!(miner_genesis, follower_c_genesis);
+
+        for height in 1..=4 {
+            let _ = mine_and_apply_empty_block(
+                &miner.chain,
+                height,
+                0xB0u8.wrapping_add(height as u8),
+                "miner-a",
+            )
+            .await?;
+        }
+
+        let transfer = transfer_tx(21, 0, &recipient, 100, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let transfer_json = serde_json::to_string(&transfer)?;
+        let transfer_id = canonical_tx_id(&transfer);
+
+        let api_state = miner.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let (status, body) = post_json(api_state, &transfer_json).await?;
+        assert_eq!(status, 200);
+        assert!(body.contains("\"status\":\"accepted\""));
+        assert!(body.contains(&transfer_id));
+
+        let (tip, balances, nonces, mempool_txs) = {
+            let guard = miner.chain.lock().await;
+            (
+                guard.blocks.last().unwrap().clone(),
+                guard.balances.clone(),
+                guard.nonces.clone(),
+                miner.mempool.select_for_block(200),
+            )
+        };
+        let block = build_mined_block(
+            &tip,
+            5,
+            tip.header.timestamp + TARGET_BLOCK_TIME,
+            0xFE,
+            mempool_txs,
+            &balances,
+            &nonces,
+            "miner-a",
+        )?;
+        let result = {
+            let mut guard = miner.chain.lock().await;
+            apply_block(&mut guard, &block, None)
+        };
+        assert_eq!(result, AcceptResult::CanonExtension { height: 5 });
+        miner.mempool.remove_confirmed(&[transfer_id.clone()]);
+        assert_eq!(block.txs.len(), 2);
+
+        let miner_peer = miner.addr.to_string();
+        sync_node_to_peer(&follower_b, &miner_peer, 5).await?;
+        sync_node_to_peer(&follower_c, &miner_peer, 5).await?;
+
+        let miner_snapshot_5 = node_snapshot(&miner, &sender, &recipient).await;
+        let follower_b_snapshot_5 = node_snapshot(&follower_b, &sender, &recipient).await;
+        let follower_c_snapshot_5 = node_snapshot(&follower_c, &sender, &recipient).await;
+        assert_eq!(miner_snapshot_5, follower_b_snapshot_5);
+        assert_eq!(miner_snapshot_5, follower_c_snapshot_5);
+        assert_eq!(miner_snapshot_5.0, 5);
+        assert_eq!(miner_snapshot_5.4, 897u128);
+        assert_eq!(miner_snapshot_5.5, 100u128);
+        assert_eq!(miner_snapshot_5.6, 1u64);
+
+        follower_b.peer_manager.set_state(&miner_peer, PeerState::Disconnected);
+
+        for height in 6..=10 {
+            let _ = mine_and_apply_empty_block(
+                &miner.chain,
+                height,
+                0xC0u8.wrapping_add(height as u8),
+                "miner-a",
+            )
+            .await?;
+        }
+
+        sync_node_to_peer(&follower_c, &miner_peer, 10).await?;
+        sync_node_to_peer(&follower_b, &miner_peer, 10).await?;
+
+        let miner_snapshot = node_snapshot(&miner, &sender, &recipient).await;
+        let follower_b_snapshot = node_snapshot(&follower_b, &sender, &recipient).await;
+        let follower_c_snapshot = node_snapshot(&follower_c, &sender, &recipient).await;
+
+        assert_eq!(miner_snapshot.0, 10);
+        assert_eq!(follower_b_snapshot.0, 10);
+        assert_eq!(follower_c_snapshot.0, 10);
+        assert_eq!(miner_snapshot, follower_b_snapshot);
+        assert_eq!(miner_snapshot, follower_c_snapshot);
+        assert_eq!(miner_snapshot.4, 897u128);
+        assert_eq!(miner_snapshot.5, 100u128);
+        assert_eq!(miner_snapshot.6, 1u64);
+
+        stop_node(miner).await;
+        stop_node(follower_b).await;
+        stop_node(follower_c).await;
+        Ok(())
+    }
 }
-
-
