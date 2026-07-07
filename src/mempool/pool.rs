@@ -1,14 +1,32 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use super::admission::{AdmissionDecision, MempoolAdmission, MempoolAdmissionError};
 use crate::config::constants::MEMPOOL_MAX;
+use crate::types::transaction::canonical_tx_id;
 use crate::types::Tx;
 
 /// Inner pool state, accessed exclusively through `Mempool`.
 struct Pool {
-    /// Primary index: tx_id → Transaction.
+    /// Primary index: canonical tx_id -> transaction.
     by_id: HashMap<String, Tx>,
 
-    /// Insertion-ordered queue of tx_ids (FIFO eviction when full).
+    /// Insertion-ordered queue of canonical tx_ids.
     order: VecDeque<String>,
+}
+
+fn tx_key(tx: &Tx) -> String {
+    canonical_tx_id(tx)
+}
+
+fn insert_locked(pool: &mut Pool, id: String, tx: Tx) {
+    if pool.by_id.len() >= MEMPOOL_MAX {
+        if let Some(evict_id) = pool.order.pop_front() {
+            pool.by_id.remove(&evict_id);
+        }
+    }
+
+    pool.order.push_back(id.clone());
+    pool.by_id.insert(id, tx);
 }
 
 impl Pool {
@@ -41,30 +59,55 @@ impl Mempool {
         }
     }
 
-    /// Insert a transaction. Returns `false` if the tx was already present.
+    /// Insert a transaction without running admission checks.
+    ///
+    /// This keeps the legacy FIFO helper available for tests and internal setup,
+    /// but keys the pool by canonical transaction id.
     pub fn insert(&self, tx: Tx) -> bool {
-        let id = tx.tx_id();
+        let id = tx_key(&tx);
         let mut p = self.inner.lock().unwrap();
         if p.by_id.contains_key(&id) {
             return false;
         }
-        // Evict oldest if at capacity.
-        if p.by_id.len() >= MEMPOOL_MAX {
-            if let Some(evict_id) = p.order.pop_front() {
-                p.by_id.remove(&evict_id);
-            }
-        }
-        p.order.push_back(id.clone());
-        p.by_id.insert(id, tx);
+
+        insert_locked(&mut p, id, tx);
         true
     }
 
-    /// Check whether a tx_id is present.
+    /// Validate and admit a transaction against the canonical mempool policy.
+    pub fn admit(
+        &self,
+        tx: Tx,
+        current_nonce: u64,
+    ) -> Result<AdmissionDecision, MempoolAdmissionError> {
+        let mut p = self.inner.lock().unwrap();
+        let pending: Vec<Tx> = p
+            .order
+            .iter()
+            .filter_map(|id| p.by_id.get(id).cloned())
+            .collect();
+        let decision = MempoolAdmission::new(current_nonce, &pending).evaluate(&tx)?;
+
+        match &decision {
+            AdmissionDecision::Accept => {
+                insert_locked(&mut p, tx_key(&tx), tx);
+            }
+            AdmissionDecision::Replace { evict_tx_id } => {
+                p.by_id.remove(evict_tx_id);
+                p.order.retain(|id| id != evict_tx_id);
+                insert_locked(&mut p, tx_key(&tx), tx);
+            }
+        }
+
+        Ok(decision)
+    }
+
+    /// Check whether a canonical tx_id is present.
     pub fn has(&self, tx_id: &str) -> bool {
         self.inner.lock().unwrap().by_id.contains_key(tx_id)
     }
 
-    /// Retrieve a transaction by id.
+    /// Retrieve a transaction by canonical tx_id.
     pub fn get(&self, tx_id: &str) -> Option<Tx> {
         self.inner.lock().unwrap().by_id.get(tx_id).cloned()
     }
@@ -78,7 +121,7 @@ impl Mempool {
         self.len() == 0
     }
 
-    /// Return all tx_ids in insertion order.
+    /// Return all canonical tx_ids in insertion order.
     pub fn list_ids(&self) -> Vec<String> {
         self.inner.lock().unwrap().order.iter().cloned().collect()
     }
@@ -95,42 +138,74 @@ impl Mempool {
             .collect()
     }
 
-    /// Remove a set of transaction ids (called after block acceptance).
+    /// Remove a set of canonical transaction ids after block acceptance.
     pub fn remove_confirmed(&self, tx_ids: &[String]) {
         let mut p = self.inner.lock().unwrap();
         for id in tx_ids {
             p.by_id.remove(id);
         }
-        // Collect owned keys to release the immutable borrow before calling
-        // retain (which needs a mutable borrow of p.order).
-        let keep: std::collections::HashSet<String> =
-            p.by_id.keys().cloned().collect();
+        let keep: HashSet<String> = p.by_id.keys().cloned().collect();
         p.order.retain(|id| keep.contains(id));
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::transaction::{
+        canonical_unsigned_payload, CashTransferArgs, TxValidationError,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
 
-    /// Build a minimal non-coinbase transaction with a given nonce so that
-    /// different nonces produce different tx_ids.
     fn make_tx(nonce: u64) -> Tx {
         Tx {
             nonce,
             sender_pubkey: "aa".repeat(32),
-            module:        "transfer".to_string(),
-            method:        "send".to_string(),
-            args:          vec![],
-            tip:           0,
-            fee_limit:     0,
-            sig:           "sig".to_string(),
+            module: "transfer".to_string(),
+            method: "send".to_string(),
+            args: vec![],
+            tip: 0,
+            fee_limit: 0,
+            sig: "sig".to_string(),
         }
     }
 
-    // ── insert / duplicate rejection ─────────────────────────────────────────
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn transfer_args(to: &str, amount: u128) -> Vec<u8> {
+        serde_json::to_vec(&CashTransferArgs {
+            to: to.to_string(),
+            amount,
+        })
+        .unwrap()
+    }
+
+    fn sign_tx(mut tx: Tx, seed: u8) -> Tx {
+        let signing_key = signing_key(seed);
+        tx.sender_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        tx.sig.clear();
+        let sig = signing_key.sign(&canonical_unsigned_payload(&tx));
+        tx.sig = hex::encode(sig.to_bytes());
+        tx
+    }
+
+    fn signed_transfer_tx(seed: u8, nonce: u64, tip: u64, fee_limit: u64, amount: u128) -> Tx {
+        sign_tx(
+            Tx {
+                nonce,
+                sender_pubkey: String::new(),
+                module: "cash".to_string(),
+                method: "transfer".to_string(),
+                args: transfer_args(&"22".repeat(32), amount),
+                tip,
+                fee_limit,
+                sig: String::new(),
+            },
+            seed,
+        )
+    }
 
     #[test]
     fn insert_returns_true_for_new_tx() {
@@ -147,6 +222,18 @@ mod tests {
     }
 
     #[test]
+    fn insert_rejects_duplicate_canonical_tx_id_when_only_sig_changes() {
+        let mp = Mempool::new();
+        let tx = make_tx(42);
+        let mut same_unsigned = tx.clone();
+        same_unsigned.sig = "different-signature".to_string();
+
+        assert!(mp.insert(tx));
+        assert!(!mp.insert(same_unsigned));
+        assert_eq!(mp.len(), 1);
+    }
+
+    #[test]
     fn duplicate_does_not_increase_len() {
         let mp = Mempool::new();
         let tx = make_tx(7);
@@ -155,13 +242,11 @@ mod tests {
         assert_eq!(mp.len(), 1);
     }
 
-    // ── has / get ─────────────────────────────────────────────────────────────
-
     #[test]
     fn has_returns_true_after_insert() {
         let mp = Mempool::new();
         let tx = make_tx(1);
-        let id = tx.tx_id();
+        let id = canonical_tx_id(&tx);
         mp.insert(tx);
         assert!(mp.has(&id));
     }
@@ -176,7 +261,7 @@ mod tests {
     fn get_returns_tx_by_id() {
         let mp = Mempool::new();
         let tx = make_tx(3);
-        let id = tx.tx_id();
+        let id = canonical_tx_id(&tx);
         mp.insert(tx.clone());
         assert_eq!(mp.get(&id), Some(tx));
     }
@@ -187,17 +272,15 @@ mod tests {
         assert!(mp.get("missing").is_none());
     }
 
-    // ── list_ids / select_for_block ───────────────────────────────────────────
-
     #[test]
     fn list_ids_preserves_insertion_order() {
         let mp = Mempool::new();
         let t1 = make_tx(1);
         let t2 = make_tx(2);
         let t3 = make_tx(3);
-        let id1 = t1.tx_id();
-        let id2 = t2.tx_id();
-        let id3 = t3.tx_id();
+        let id1 = canonical_tx_id(&t1);
+        let id2 = canonical_tx_id(&t2);
+        let id3 = canonical_tx_id(&t3);
         mp.insert(t1);
         mp.insert(t2);
         mp.insert(t3);
@@ -218,15 +301,13 @@ mod tests {
         let mp = Mempool::new();
         let t1 = make_tx(1);
         let t2 = make_tx(2);
-        let id1 = t1.tx_id();
+        let id1 = canonical_tx_id(&t1);
         mp.insert(t1);
         mp.insert(t2);
         let selected = mp.select_for_block(1);
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].tx_id(), id1);
+        assert_eq!(canonical_tx_id(&selected[0]), id1);
     }
-
-    // ── remove_confirmed (block-application removal) ──────────────────────────
 
     #[test]
     fn remove_confirmed_drops_included_txs() {
@@ -234,17 +315,18 @@ mod tests {
         let t1 = make_tx(1);
         let t2 = make_tx(2);
         let t3 = make_tx(3);
-        let id1 = t1.tx_id();
-        let id2 = t2.tx_id();
+        let id1 = canonical_tx_id(&t1);
+        let id2 = canonical_tx_id(&t2);
+        let id3 = canonical_tx_id(&t3);
         mp.insert(t1);
         mp.insert(t2);
-        mp.insert(t3.clone());
+        mp.insert(t3);
 
         mp.remove_confirmed(&[id1.clone(), id2.clone()]);
 
         assert!(!mp.has(&id1));
         assert!(!mp.has(&id2));
-        assert!(mp.has(&t3.tx_id()));
+        assert!(mp.has(&id3));
         assert_eq!(mp.len(), 1);
     }
 
@@ -254,15 +336,15 @@ mod tests {
         let t1 = make_tx(1);
         let t2 = make_tx(2);
         let t3 = make_tx(3);
-        let id1 = t1.tx_id();
-        let id3 = t3.tx_id();
+        let id1 = canonical_tx_id(&t1);
+        let id2 = canonical_tx_id(&t2);
+        let id3 = canonical_tx_id(&t3);
         mp.insert(t1);
-        mp.insert(t2.clone());
+        mp.insert(t2);
         mp.insert(t3);
 
-        mp.remove_confirmed(&[t2.tx_id()]);
+        mp.remove_confirmed(&[id2]);
 
-        // Only t1 and t3 should remain, in original order.
         assert_eq!(mp.list_ids(), vec![id1, id3]);
     }
 
@@ -270,7 +352,6 @@ mod tests {
     fn remove_confirmed_unknown_ids_are_ignored() {
         let mp = Mempool::new();
         mp.insert(make_tx(1));
-        // Should not panic on unknown ids.
         mp.remove_confirmed(&["no_such_id".to_string()]);
         assert_eq!(mp.len(), 1);
     }
@@ -280,8 +361,8 @@ mod tests {
         let mp = Mempool::new();
         let t1 = make_tx(1);
         let t2 = make_tx(2);
-        let id1 = t1.tx_id();
-        let id2 = t2.tx_id();
+        let id1 = canonical_tx_id(&t1);
+        let id2 = canonical_tx_id(&t2);
         mp.insert(t1);
         mp.insert(t2);
 
@@ -291,29 +372,176 @@ mod tests {
         assert_eq!(mp.list_ids(), Vec::<String>::new());
     }
 
-    // ── capacity / eviction ───────────────────────────────────────────────────
-
     #[test]
     fn pool_never_exceeds_mempool_max() {
         let mp = Mempool::new();
         for n in 0..=(MEMPOOL_MAX as u64 + 10) {
             mp.insert(make_tx(n));
         }
-        assert!(mp.len() <= MEMPOOL_MAX, "len {} exceeds MEMPOOL_MAX {}", mp.len(), MEMPOOL_MAX);
+        assert!(
+            mp.len() <= MEMPOOL_MAX,
+            "len {} exceeds MEMPOOL_MAX {}",
+            mp.len(),
+            MEMPOOL_MAX
+        );
     }
 
     #[test]
     fn eviction_removes_oldest_when_full() {
         let mp = Mempool::new();
-        // Fill to capacity.
         for n in 0..MEMPOOL_MAX as u64 {
             mp.insert(make_tx(n));
         }
-        let first_id = make_tx(0).tx_id();
+        let first_id = canonical_tx_id(&make_tx(0));
         assert!(mp.has(&first_id), "sanity: first tx present before overflow");
 
-        // One more evicts the oldest.
         mp.insert(make_tx(MEMPOOL_MAX as u64));
         assert!(!mp.has(&first_id), "oldest tx should have been evicted");
+    }
+
+    #[test]
+    fn admit_accepts_valid_tx_and_stores_by_canonical_id() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        let id = canonical_tx_id(&tx);
+
+        assert_eq!(mp.admit(tx.clone(), 0), Ok(AdmissionDecision::Accept));
+        assert!(mp.has(&id));
+        assert_eq!(mp.get(&id), Some(tx));
+    }
+
+    #[test]
+    fn admit_rejects_invalid_signature_without_insert() {
+        let mp = Mempool::new();
+        let mut tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        tx.sig = "00".repeat(64);
+
+        assert!(matches!(
+            mp.admit(tx, 0),
+            Err(MempoolAdmissionError::StatelessValidation(
+                TxValidationError::Signature(_)
+            ))
+        ));
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn admit_rejects_fee_limit_below_threshold_without_insert() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 0, 2, 200, 1);
+
+        assert_eq!(
+            mp.admit(tx, 0),
+            Err(MempoolAdmissionError::StatelessValidation(
+                TxValidationError::FeeLimitTooLow
+            ))
+        );
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn admit_rejects_stale_nonce() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 4, 2, 1_000, 1);
+
+        assert_eq!(
+            mp.admit(tx, 5),
+            Err(MempoolAdmissionError::StaleNonce {
+                current_nonce: 5,
+                tx_nonce: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn admit_rejects_nonce_gap_greater_than_one() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 7, 2, 1_000, 1);
+
+        assert_eq!(
+            mp.admit(tx, 5),
+            Err(MempoolAdmissionError::NonceGap {
+                current_nonce: 5,
+                tx_nonce: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn admit_rejects_duplicate_canonical_tx_id() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+
+        assert_eq!(mp.admit(tx.clone(), 0), Ok(AdmissionDecision::Accept));
+        assert_eq!(
+            mp.admit(tx, 0),
+            Err(MempoolAdmissionError::DuplicateCanonicalTxId)
+        );
+        assert_eq!(mp.len(), 1);
+    }
+
+    #[test]
+    fn admit_rejects_duplicate_sender_nonce_without_higher_tip() {
+        let mp = Mempool::new();
+        let existing = signed_transfer_tx(1, 0, 3, 1_000, 1);
+        let replacement = signed_transfer_tx(1, 0, 3, 1_000, 2);
+
+        assert_eq!(mp.admit(existing, 0), Ok(AdmissionDecision::Accept));
+        assert_eq!(
+            mp.admit(replacement.clone(), 0),
+            Err(MempoolAdmissionError::DuplicateSenderNonce {
+                sender_pubkey: replacement.sender_pubkey.clone(),
+                nonce: 0,
+                existing_tip: 3,
+                new_tip: 3,
+            })
+        );
+        assert_eq!(mp.len(), 1);
+    }
+
+    #[test]
+    fn admit_replaces_same_sender_nonce_with_strictly_higher_tip() {
+        let mp = Mempool::new();
+        let existing = signed_transfer_tx(1, 0, 3, 1_000, 1);
+        let replacement = signed_transfer_tx(1, 0, 4, 1_000, 1);
+        let old_id = canonical_tx_id(&existing);
+        let new_id = canonical_tx_id(&replacement);
+
+        assert_eq!(mp.admit(existing, 0), Ok(AdmissionDecision::Accept));
+        assert_eq!(
+            mp.admit(replacement.clone(), 0),
+            Ok(AdmissionDecision::Replace {
+                evict_tx_id: old_id.clone(),
+            })
+        );
+
+        assert_eq!(mp.len(), 1);
+        assert!(!mp.has(&old_id));
+        assert!(mp.has(&new_id));
+        assert_eq!(mp.get(&new_id), Some(replacement));
+    }
+
+    #[test]
+    fn admit_rejects_replacement_with_lower_tip_without_mutation() {
+        let mp = Mempool::new();
+        let existing = signed_transfer_tx(1, 0, 4, 1_000, 1);
+        let replacement = signed_transfer_tx(1, 0, 3, 1_000, 2);
+        let old_id = canonical_tx_id(&existing);
+        let new_id = canonical_tx_id(&replacement);
+
+        assert_eq!(mp.admit(existing, 0), Ok(AdmissionDecision::Accept));
+        assert_eq!(
+            mp.admit(replacement.clone(), 0),
+            Err(MempoolAdmissionError::DuplicateSenderNonce {
+                sender_pubkey: replacement.sender_pubkey.clone(),
+                nonce: 0,
+                existing_tip: 4,
+                new_tip: 3,
+            })
+        );
+
+        assert_eq!(mp.len(), 1);
+        assert!(mp.has(&old_id));
+        assert!(!mp.has(&new_id));
     }
 }
