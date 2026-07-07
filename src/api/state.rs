@@ -3,10 +3,12 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
+use crate::api::transactions::{submit_transaction as submit_transaction_service, TransactionSubmissionResult};
 use crate::chain::ChainState;
 use crate::mempool::Mempool;
 use crate::miner::MinerManager;
 use crate::p2p::peer_manager::PeerManager;
+use crate::types::Tx;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct MiningStatusSnapshot {
@@ -63,6 +65,11 @@ impl NodeApiState {
     pub(crate) fn with_miner_manager(mut self, miner_manager: Arc<MinerManager>) -> Self {
         self.miner_manager = Some(miner_manager);
         self
+    }
+
+    pub(crate) async fn submit_transaction(&self, tx: Tx) -> TransactionSubmissionResult {
+        let chain = self.chain.lock().await;
+        submit_transaction_service(&chain, &self.mempool, tx)
     }
 
     pub(crate) async fn status_snapshot(&self) -> NodeStatusSnapshot {
@@ -258,3 +265,5 @@ mod tests {
         );
     }
 }
+
+
