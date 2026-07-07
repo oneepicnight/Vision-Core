@@ -1,8 +1,9 @@
-use crate::chain::ChainState;
+﻿use crate::chain::ChainState;
 use crate::config::constants::MAX_REORG;
 use crate::types::Block;
+use crate::types::transaction::{simulate_tx_execution, TxExecutionError, TxExecutionState};
 
-// ─── Chain-select helpers ─────────────────────────────────────────────────────
+// â”€â”€â”€ Chain-select helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Walk backwards from `tip_hash` through the side-block store, collecting
 /// every block until a canonical ancestor is reached.
@@ -16,7 +17,7 @@ fn collect_new_segment(g: &ChainState, tip_hash: &str) -> Vec<Block> {
 
     loop {
         if g.canon_index.contains_key(current.as_str()) {
-            // `current` is already canonical — it is the common ancestor.
+            // `current` is already canonical â€” it is the common ancestor.
             break;
         }
         match g.side_blocks.get(current.as_str()) {
@@ -32,35 +33,71 @@ fn collect_new_segment(g: &ChainState, tip_hash: &str) -> Vec<Block> {
         }
     }
 
-    segment.reverse(); // oldest → newest
+    segment.reverse(); // oldest â†’ newest
     segment
 }
 
-// ─── Reorg entry point ────────────────────────────────────────────────────────
+// â”€â”€â”€ Reorg entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Attempt to reorganise to the chain that ends at `new_tip`.
 ///
 /// The function walks backwards through `g.side_blocks` from `new_tip` to
 /// find the common ancestor with the current canonical chain, then:
 ///
-/// 1. Checks that the reorg depth ≤ `MAX_REORG` (protects finalised blocks).
+/// 1. Checks that the reorg depth â‰¤ `MAX_REORG` (protects finalised blocks).
 /// 2. Demotes canonical blocks above the common ancestor to `side_blocks`.
 /// 3. Promotes the new segment from `side_blocks` to canonical.
 /// 4. Rebuilds `canon_index` and `cumulative_work` across the affected range.
 ///
 /// Returns `true` if the canonical tip changed; `false` if the reorg was
 /// rejected (depth too large, broken ancestry, or common ancestor not found).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SideStateReconstructionError {
+    BrokenAncestry {
+        expected_parent: String,
+        got_parent: String,
+    },
+    Execution(TxExecutionError),
+}
+
+fn reconstruct_branch_state(
+    _g: &ChainState,
+    ancestor_hash: &str,
+    ancestor_state: &TxExecutionState,
+    branch: &[Block],
+) -> Result<TxExecutionState, SideStateReconstructionError> {
+    let mut state = ancestor_state.clone();
+    let mut expected_parent = ancestor_hash.to_string();
+
+    for blk in branch {
+        if blk.header.parent_hash != expected_parent {
+            return Err(SideStateReconstructionError::BrokenAncestry {
+                expected_parent,
+                got_parent: blk.header.parent_hash.clone(),
+            });
+        }
+
+        for tx in blk.txs.iter().skip(1) {
+            simulate_tx_execution(&mut state, tx)
+                .map_err(SideStateReconstructionError::Execution)?;
+        }
+
+        expected_parent = blk.hash().to_string();
+    }
+
+    Ok(state)
+}
 pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
     let new_tip_hash = new_tip.hash();
 
-    // ── 1. Trace the new chain segment back to a canonical ancestor ───────────
+    // â”€â”€ 1. Trace the new chain segment back to a canonical ancestor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let new_segment = collect_new_segment(g, new_tip_hash);
     if new_segment.is_empty() {
         tracing::debug!("[REORG] aborted: cannot trace ancestry of {:.8}", new_tip_hash);
         return false;
     }
 
-    // ── 2. Locate the common ancestor ──────────────────────────────────────────
+    // â”€â”€ 2. Locate the common ancestor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let common_hash = &new_segment[0].header.parent_hash;
     let &common_height = match g.canon_index.get(common_hash.as_str()) {
         Some(h) => h,
@@ -70,7 +107,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         }
     };
 
-    // ── 3. Depth guard ─────────────────────────────────────────────────────────
+    // â”€â”€ 3. Depth guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let reorg_depth = g.current_height().saturating_sub(common_height);
     if reorg_depth > MAX_REORG {
         tracing::warn!(
@@ -80,7 +117,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         return false;
     }
 
-    // ── 4. Demote canonical blocks above the common ancestor ───────────────────
+    // â”€â”€ 4. Demote canonical blocks above the common ancestor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let demoted: Vec<Block> = g.blocks.drain((common_height as usize + 1)..).collect();
     for b in &demoted {
         let h = b.hash().to_string();
@@ -92,13 +129,13 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         demoted.len(), common_height
     );
 
-    // ── 5. Promote the new segment ────────────────────────────────────────────
+    // â”€â”€ 5. Promote the new segment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Seed cumulative work at the common ancestor; then accumulate forward.
     let mut cw = g.cumulative_work
         .get(common_hash.as_str())
         .copied()
         .unwrap_or_else(|| {
-            // Recompute from the genesis if cache is cold — should be rare.
+            // Recompute from the genesis if cache is cold â€” should be rare.
             g.blocks.iter().map(|b| b.header.difficulty as u128).sum()
         });
 
@@ -141,7 +178,7 @@ pub fn cumulative_work(g: &ChainState, block_hash: &str) -> u128 {
     0
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -151,10 +188,125 @@ mod tests {
     use crate::chain::state::ChainState;
     use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
     use crate::genesis::genesis_block;
+    use crate::chain::state_root::compute_state_root;
+    use crate::pow::visionx::historical_block_digest;
+    use crate::pow::VISIONX_PARAMS;
+    use crate::types::transaction::{
+        canonical_unsigned_payload, CashTransferArgs, MIN_CASH_TRANSFER_FEE_LIMIT,
+        TxExecutionState,
+    };
+    use crate::types::Tx;
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
         ChainState::empty(db)
+    }
+
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn transfer_args(to: &str, amount: u128) -> Vec<u8> {
+        serde_json::to_vec(&CashTransferArgs {
+            to: to.to_string(),
+            amount,
+        })
+        .unwrap()
+    }
+
+    fn sign_tx(mut tx: Tx, seed: u8) -> Tx {
+        let signing_key = signing_key(seed);
+        tx.sender_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        tx.sig.clear();
+        let sig = signing_key.sign(&canonical_unsigned_payload(&tx));
+        tx.sig = hex::encode(sig.to_bytes());
+        tx
+    }
+
+    fn signed_transfer_tx(seed: u8, nonce: u64, to: &str, amount: u128, tip: u64) -> Tx {
+        sign_tx(
+            Tx {
+                nonce,
+                sender_pubkey: String::new(),
+                module: "cash".to_string(),
+                method: "transfer".to_string(),
+                args: transfer_args(to, amount),
+                tip,
+                fee_limit: MIN_CASH_TRANSFER_FEE_LIMIT,
+                sig: String::new(),
+            },
+            seed,
+        )
+    }
+
+    fn recompute_tx_root(txs: &[Tx]) -> String {
+        let mut h = blake3::Hasher::new();
+        for tx in txs {
+            h.update(tx.tx_id().as_bytes());
+        }
+        hex::encode(h.finalize().as_bytes())
+    }
+
+    fn rehash_block(block: &mut Block) {
+        block.header.tx_root = recompute_tx_root(&block.txs);
+        block.header.pow_hash.clear();
+        let epoch = VISIONX_PARAMS.epoch(block.header.number);
+        let digest = historical_block_digest(&VISIONX_PARAMS, epoch, &block.header)
+            .expect("historical VisionX digest should build");
+        block.header.pow_hash = hex::encode(digest);
+        block.weight = block.txs.len() as u64;
+    }
+
+    fn state_after_seed() -> TxExecutionState {
+        let mut balances = std::collections::BTreeMap::new();
+        let nonces = std::collections::BTreeMap::new();
+        let sender = hex::encode(signing_key(7).verifying_key().to_bytes());
+        balances.insert(sender, 100);
+        TxExecutionState::from_balances_and_nonces(balances, nonces)
+    }
+
+    fn state_after_block(seed: &TxExecutionState, block: &Block) -> TxExecutionState {
+        let mut state = seed.clone();
+        for tx in block.txs.iter().skip(1) {
+            crate::types::transaction::simulate_tx_execution(&mut state, tx).unwrap();
+        }
+        state
+    }
+
+    fn branch_block(
+        parent_hash: &str,
+        height: u64,
+        timestamp: u64,
+        slot: u8,
+        extra_txs: Vec<Tx>,
+        balances: &std::collections::BTreeMap<String, u128>,
+        nonces: &std::collections::BTreeMap<String, u64>,
+    ) -> Block {
+        let mut blk = make_test_block(parent_hash, height, timestamp, slot);
+        blk.txs.extend(extra_txs);
+        let mut exec_state = TxExecutionState::from_balances_and_nonces(
+            balances.clone(),
+            nonces.clone(),
+        );
+        for tx in blk.txs.iter().skip(1) {
+            crate::types::transaction::simulate_tx_execution(&mut exec_state, tx).ok();
+        }
+        blk.header.state_root = compute_state_root(&exec_state.balances, &exec_state.nonces)
+            .expect("test helper should compute a valid state root");
+        rehash_block(&mut blk);
+        blk
+    }
+
+    fn no_op_valid_block(
+        parent_hash: &str,
+        height: u64,
+        timestamp: u64,
+        slot: u8,
+        balances: &std::collections::BTreeMap<String, u128>,
+        nonces: &std::collections::BTreeMap<String, u64>,
+    ) -> Block {
+        branch_block(parent_hash, height, timestamp, slot, Vec::new(), balances, nonces)
     }
 
     /// Build a short canonical chain of `n` blocks on top of genesis.
@@ -176,9 +328,311 @@ mod tests {
         (g, blocks)
     }
 
-    // ── cumulative_work ───────────────────────────────────────────────────────
+    // â”€â”€ cumulative_work â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
+    fn reconstructs_from_canonical_ancestor() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let sender = hex::encode(signing_key(7).verifying_key().to_bytes());
+        let recipient_1 = hex::encode(signing_key(8).verifying_key().to_bytes());
+        let recipient_2 = hex::encode(signing_key(9).verifying_key().to_bytes());
+        let mut ancestor_balances = std::collections::BTreeMap::new();
+        ancestor_balances.insert(sender.clone(), 100);
+        let ancestor_nonces = std::collections::BTreeMap::new();
+
+        let ancestor = branch_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![signed_transfer_tx(7, 0, &recipient_1, 40, 2)],
+            &ancestor_balances,
+            &ancestor_nonces,
+        );
+        apply_block(&mut g, &ancestor, None);
+        let ancestor_state = state_after_block(&state_after_seed(), &ancestor);
+
+        let branch_1 = branch_block(
+            ancestor.hash(),
+            2,
+            ancestor.header.timestamp + TARGET_BLOCK_TIME,
+            0xBB,
+            vec![signed_transfer_tx(7, 1, &recipient_2, 10, 1)],
+            &g.balances,
+            &g.nonces,
+        );
+        let branch_2 = no_op_valid_block(
+            branch_1.hash(),
+            3,
+            branch_1.header.timestamp + TARGET_BLOCK_TIME,
+            0xBC,
+            &g.balances,
+            &g.nonces,
+        );
+
+        let reconstructed = reconstruct_branch_state(
+            &g,
+            ancestor.hash(),
+            &ancestor_state,
+            &[branch_1.clone(), branch_2.clone()],
+        )
+        .expect("branch reconstruction should succeed");
+
+        assert_eq!(reconstructed.balance_of(&sender), 45);
+        assert_eq!(reconstructed.balance_of(&recipient_1), 40);
+        assert_eq!(reconstructed.balance_of(&recipient_2), 10);
+        assert_eq!(reconstructed.nonce_of(&sender), 2);
+    }
+
+    #[test]
+    fn reconstruction_is_independent_of_current_canonical_tip() {
+        let mut g1 = temp_state();
+        let mut g2 = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g1, &gen, None);
+        apply_block(&mut g2, &gen, None);
+
+        let sender = hex::encode(signing_key(7).verifying_key().to_bytes());
+        let recipient = hex::encode(signing_key(8).verifying_key().to_bytes());
+        let mut ancestor_balances = std::collections::BTreeMap::new();
+        ancestor_balances.insert(sender.clone(), 100);
+        let ancestor_nonces = std::collections::BTreeMap::new();
+
+        let ancestor = branch_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![signed_transfer_tx(7, 0, &recipient, 40, 2)],
+            &ancestor_balances,
+            &ancestor_nonces,
+        );
+        apply_block(&mut g1, &ancestor, None);
+        apply_block(&mut g2, &ancestor, None);
+
+        let tip_1 = no_op_valid_block(
+            ancestor.hash(),
+            2,
+            ancestor.header.timestamp + TARGET_BLOCK_TIME,
+            0xAB,
+            &g1.balances,
+            &g1.nonces,
+        );
+        let tip_2 = no_op_valid_block(
+            tip_1.hash(),
+            3,
+            tip_1.header.timestamp + TARGET_BLOCK_TIME,
+            0xAC,
+            &g2.balances,
+            &g2.nonces,
+        );
+        apply_block(&mut g1, &tip_1, None);
+        apply_block(&mut g2, &tip_1, None);
+        apply_block(&mut g2, &tip_2, None);
+
+        let ancestor_state = state_after_block(&state_after_seed(), &ancestor);
+        let branch_1 = branch_block(
+            ancestor.hash(),
+            2,
+            ancestor.header.timestamp + TARGET_BLOCK_TIME,
+            0xBB,
+            vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
+            &g1.balances,
+            &g1.nonces,
+        );
+        let branch_2 = no_op_valid_block(
+            branch_1.hash(),
+            3,
+            branch_1.header.timestamp + TARGET_BLOCK_TIME,
+            0xBC,
+            &g1.balances,
+            &g1.nonces,
+        );
+
+        let reconstructed_1 = reconstruct_branch_state(
+            &g1,
+            ancestor.hash(),
+            &ancestor_state,
+            &[branch_1.clone(), branch_2.clone()],
+        )
+        .expect("reconstruction should succeed");
+        let reconstructed_2 = reconstruct_branch_state(
+            &g2,
+            ancestor.hash(),
+            &ancestor_state,
+            &[branch_1, branch_2],
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(reconstructed_1, reconstructed_2);
+    }
+
+    #[test]
+    fn identical_branch_history_reconstructs_identical_state() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let sender = hex::encode(signing_key(7).verifying_key().to_bytes());
+        let recipient = hex::encode(signing_key(8).verifying_key().to_bytes());
+        let mut ancestor_balances = std::collections::BTreeMap::new();
+        ancestor_balances.insert(sender.clone(), 100);
+        let ancestor_nonces = std::collections::BTreeMap::new();
+
+        let ancestor = branch_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![signed_transfer_tx(7, 0, &recipient, 40, 2)],
+            &ancestor_balances,
+            &ancestor_nonces,
+        );
+        apply_block(&mut g, &ancestor, None);
+        let ancestor_state = state_after_block(&state_after_seed(), &ancestor);
+
+        let branch_1 = branch_block(
+            ancestor.hash(),
+            2,
+            ancestor.header.timestamp + TARGET_BLOCK_TIME,
+            0xBB,
+            vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
+            &g.balances,
+            &g.nonces,
+        );
+        let branch_2 = no_op_valid_block(
+            branch_1.hash(),
+            3,
+            branch_1.header.timestamp + TARGET_BLOCK_TIME,
+            0xBC,
+            &g.balances,
+            &g.nonces,
+        );
+
+        let reconstructed_1 = reconstruct_branch_state(
+            &g,
+            ancestor.hash(),
+            &ancestor_state,
+            &[branch_1.clone(), branch_2.clone()],
+        )
+        .expect("reconstruction should succeed");
+        let reconstructed_2 = reconstruct_branch_state(
+            &g,
+            ancestor.hash(),
+            &ancestor_state,
+            &[branch_1, branch_2],
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(reconstructed_1, reconstructed_2);
+    }
+
+    #[test]
+    fn canonical_state_unchanged_after_reconstruction() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let sender = hex::encode(signing_key(7).verifying_key().to_bytes());
+        let recipient = hex::encode(signing_key(8).verifying_key().to_bytes());
+        let mut ancestor_balances = std::collections::BTreeMap::new();
+        ancestor_balances.insert(sender.clone(), 100);
+        let ancestor_nonces = std::collections::BTreeMap::new();
+
+        let ancestor = branch_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![signed_transfer_tx(7, 0, &recipient, 40, 2)],
+            &ancestor_balances,
+            &ancestor_nonces,
+        );
+        apply_block(&mut g, &ancestor, None);
+        let ancestor_state = state_after_block(&state_after_seed(), &ancestor);
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let branch_1 = branch_block(
+            ancestor.hash(),
+            2,
+            ancestor.header.timestamp + TARGET_BLOCK_TIME,
+            0xBB,
+            vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
+            &g.balances,
+            &g.nonces,
+        );
+        let branch_2 = no_op_valid_block(
+            branch_1.hash(),
+            3,
+            branch_1.header.timestamp + TARGET_BLOCK_TIME,
+            0xBC,
+            &g.balances,
+            &g.nonces,
+        );
+
+        let _ = reconstruct_branch_state(
+            &g,
+            ancestor.hash(),
+            &ancestor_state,
+            &[branch_1, branch_2],
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
+    #[test]
+    fn malformed_ancestry_is_rejected() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+
+        let sender = hex::encode(signing_key(7).verifying_key().to_bytes());
+        let recipient = hex::encode(signing_key(8).verifying_key().to_bytes());
+        let mut ancestor_balances = std::collections::BTreeMap::new();
+        ancestor_balances.insert(sender.clone(), 100);
+        let ancestor_nonces = std::collections::BTreeMap::new();
+
+        let ancestor = branch_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![signed_transfer_tx(7, 0, &recipient, 40, 2)],
+            &ancestor_balances,
+            &ancestor_nonces,
+        );
+        apply_block(&mut g, &ancestor, None);
+        let ancestor_state = state_after_block(&state_after_seed(), &ancestor);
+
+        let malformed_parent = "11".repeat(32);
+        let bad_branch = branch_block(
+            &malformed_parent,
+            2,
+            ancestor.header.timestamp + TARGET_BLOCK_TIME,
+            0xBB,
+            vec![signed_transfer_tx(7, 1, &recipient, 10, 1)],
+            &g.balances,
+            &g.nonces,
+        );
+
+        let result = reconstruct_branch_state(
+            &g,
+            ancestor.hash(),
+            &ancestor_state,
+            &[bad_branch],
+        );
+
+        assert!(matches!(
+            result,
+            Err(SideStateReconstructionError::BrokenAncestry { .. })
+        ));
+    }
     fn cumulative_work_single_block() {
         let (g, blocks) = build_chain(0);
         let gen = &blocks[0];
@@ -195,7 +649,7 @@ mod tests {
         assert_eq!(cumulative_work(&g, tip.hash()), expected);
     }
 
-    // ── try_reorg ─────────────────────────────────────────────────────────────
+    // â”€â”€ try_reorg â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Fork at genesis: two competing b1 candidates.
     /// The heavier one (after try_reorg is called from apply_block) wins.
@@ -207,7 +661,7 @@ mod tests {
 
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
 
-        // b1 extends genesis — canonical.
+        // b1 extends genesis â€” canonical.
         let b1 = make_test_block(gen.hash(), 1, ts, 0xAA);
         apply_block(&mut g, &b1, None);
         assert_eq!(g.tip_hash(), b1.hash());
@@ -218,7 +672,7 @@ mod tests {
         // b1p alone doesn't have more work, so canonical should still be b1.
         assert_eq!(g.tip_hash(), b1.hash(), "b1p alone must not dislodge b1");
 
-        // b2p extends b1p — now the b1p chain is longer (and heavier).
+        // b2p extends b1p â€” now the b1p chain is longer (and heavier).
         let ts2 = ts + TARGET_BLOCK_TIME;
         let b2p = make_test_block(b1p.hash(), 2, ts2, 0xCC);
         // Manually insert b2p as side block so try_reorg can find its ancestry.
@@ -269,7 +723,7 @@ mod tests {
         let (mut g, blocks) = build_chain(2);
         let tip = blocks.last().unwrap();
 
-        // A block that points to an unknown parent — ancestry chain broken.
+        // A block that points to an unknown parent â€” ancestry chain broken.
         let unknown_parent = "dead".repeat(16);
         let orphan = make_test_block(&unknown_parent, 99, tip.header.timestamp + 30, 0xDD);
         g.side_blocks.insert(orphan.hash().to_string(), orphan.clone());
@@ -286,14 +740,14 @@ mod tests {
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
         let ts2 = ts + TARGET_BLOCK_TIME;
 
-        // Build canonical: gen → b1 → b2
+        // Build canonical: gen â†’ b1 â†’ b2
         let b1 = make_test_block(gen.hash(), 1, ts, 0xAA);
         let b2 = make_test_block(b1.hash(), 2, ts2, 0xBB);
         apply_block(&mut g, &b1, None);
         apply_block(&mut g, &b2, None);
         assert_eq!(g.current_height(), 2);
 
-        // Build a heavier fork: gen → c1 → c2 → c3
+        // Build a heavier fork: gen â†’ c1 â†’ c2 â†’ c3
         let c1 = make_test_block(gen.hash(), 1, ts, 0xCC);
         let c2 = make_test_block(c1.hash(), 2, ts2, 0xDD);
         let ts3 = ts2 + TARGET_BLOCK_TIME;
@@ -316,3 +770,9 @@ mod tests {
         assert!(g.side_blocks.contains_key(b2.hash()));
     }
 }
+
+
+
+
+
+
