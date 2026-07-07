@@ -3,6 +3,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::sync::Arc;
+    use std::path::{Path, PathBuf};
 
     use anyhow::{anyhow, Result};
     use axum::body::{self, Bytes};
@@ -35,7 +36,7 @@ mod tests {
     use crate::types::{Block, BlockHeader, Tx};
 
     struct NodeHarness {
-        data_dir: TempDir,
+        data_dir: PathBuf,
         addr: SocketAddr,
         api_addr: Option<SocketAddr>,
         api_state: Option<NodeApiState>,
@@ -54,9 +55,9 @@ mod tests {
             .expect("local addr")
     }
 
-    fn node_settings(data_dir: &TempDir, addr: SocketAddr) -> Settings {
+    fn node_settings(data_dir: &Path, addr: SocketAddr) -> Settings {
         Settings {
-            data_dir: data_dir.path().display().to_string(),
+            data_dir: data_dir.display().to_string(),
             http_addr: "127.0.0.1:0".to_string(),
             p2p_addr: addr.to_string(),
             mining_enabled: false,
@@ -66,12 +67,21 @@ mod tests {
     }
 
     async fn start_node(with_api: bool) -> Result<NodeHarness> {
-        let data_dir = tempfile::tempdir()?;
+        let data_dir = tempfile::tempdir()?.into_path();
+        start_node_in_dir(data_dir, with_api).await
+    }
+
+    async fn start_node_in_dir(data_dir: PathBuf, with_api: bool) -> Result<NodeHarness> {
         let addr = fresh_port();
         let settings = node_settings(&data_dir, addr);
 
-        let mut chain_state = ChainState::open(&settings.data_dir)?;
+        let mut chain_state = ChainState::open_with_genesis(&settings.data_dir)?;
         bootstrap_chain(&mut chain_state, &settings)?;
+        let genesis_hash = chain_state.block_at(0).unwrap().hash().to_string();
+        crate::chain::storage::store_height_index(&chain_state, 0, &genesis_hash)?;
+
+        let current_height = chain_state.current_height();
+        let _ = crate::chain::snapshots::restore_latest_snapshot(&mut chain_state, current_height);
 
         let chain = Arc::new(Mutex::new(chain_state));
         let mempool = Arc::new(Mempool::new());
@@ -119,6 +129,10 @@ mod tests {
             p2p_task,
             api_task,
         })
+    }
+
+    async fn start_node_from_existing_dir(data_dir: PathBuf, with_api: bool) -> Result<NodeHarness> {
+        start_node_in_dir(data_dir, with_api).await
     }
 
     async fn stop_node(node: NodeHarness) {
@@ -315,6 +329,11 @@ mod tests {
             apply_block(&mut guard, &block, None)
         };
         assert_eq!(result, AcceptResult::CanonExtension { height });
+        {
+            let guard = chain.lock().await;
+            crate::chain::storage::store_height_index(&guard, height, &block.hash())?;
+        }
+
         Ok(block)
     }
 
@@ -372,7 +391,7 @@ mod tests {
         let follower = start_node(false).await?;
 
         assert_ne!(miner.addr, follower.addr);
-        assert_ne!(miner.data_dir.path(), follower.data_dir.path());
+        assert_ne!(miner.data_dir.as_path(), follower.data_dir.as_path());
 
         let sender_key = signing_key(11);
         let sender = hex::encode(sender_key.verifying_key().to_bytes());
@@ -508,6 +527,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_persistence_restores_chain_state_and_catches_up() -> Result<()> {
+        let miner = start_node(true).await?;
+        let live_peer = start_node(false).await?;
+
+        assert_ne!(miner.addr, live_peer.addr);
+        assert_ne!(miner.data_dir.as_path(), live_peer.data_dir.as_path());
+
+        let sender_key = signing_key(31);
+        let sender = hex::encode(sender_key.verifying_key().to_bytes());
+        let recipient = hex::encode(signing_key(32).verifying_key().to_bytes());
+        let balances = mine_state_keys(&sender, &recipient);
+        {
+            let mut miner_chain = miner.chain.lock().await;
+            miner_chain.balances = balances.clone();
+            miner_chain.nonces.insert(sender.clone(), 0);
+        }
+        {
+            let mut peer_chain = live_peer.chain.lock().await;
+            peer_chain.balances = balances.clone();
+            peer_chain.nonces.insert(sender.clone(), 0);
+        }
+
+        for height in 1..=31 {
+            let _ = mine_and_apply_empty_block(
+                &miner.chain,
+                height,
+                0xD0u8.wrapping_add(height as u8),
+                "miner-a",
+            )
+            .await?;
+        }
+
+        let transfer = transfer_tx(31, 0, &recipient, 100, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
+        let transfer_json = serde_json::to_string(&transfer)?;
+        let transfer_id = canonical_tx_id(&transfer);
+
+        let api_state = miner.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let (status, body) = post_json(api_state, &transfer_json).await?;
+        assert_eq!(status, 200);
+        assert!(body.contains("\"status\":\"accepted\""));
+        assert!(body.contains(&transfer_id));
+
+        let (tip, balances, nonces, mempool_txs) = {
+            let guard = miner.chain.lock().await;
+            (
+                guard.blocks.last().unwrap().clone(),
+                guard.balances.clone(),
+                guard.nonces.clone(),
+                miner.mempool.select_for_block(200),
+            )
+        };
+        let block = build_mined_block(
+            &tip,
+            32,
+            tip.header.timestamp + TARGET_BLOCK_TIME,
+            0xDD,
+            mempool_txs,
+            &balances,
+            &nonces,
+            "miner-a",
+        )?;
+        let result = {
+            let mut guard = miner.chain.lock().await;
+            apply_block(&mut guard, &block, None)
+        };
+        assert_eq!(result, AcceptResult::CanonExtension { height: 32 });
+        {
+            let guard = miner.chain.lock().await;
+            crate::chain::storage::store_height_index(&guard, 32, &block.hash())?;
+        }
+
+        miner.mempool.remove_confirmed(&[transfer_id.clone()]);
+
+        let expected_snapshot = node_snapshot(&miner, &sender, &recipient).await;
+        assert_eq!(expected_snapshot.0, 32);
+        assert_eq!(expected_snapshot.4, 897u128);
+        assert_eq!(expected_snapshot.5, 100u128);
+        assert_eq!(expected_snapshot.6, 1u64);
+
+        let live_peer_addr = live_peer.addr.to_string();
+        sync_node_to_peer(&live_peer, &miner.addr.to_string(), 32).await?;
+        let live_peer_snapshot_32 = node_snapshot(&live_peer, &sender, &recipient).await;
+        assert_eq!(live_peer_snapshot_32, expected_snapshot);
+
+
+        let restart_data_dir = miner.data_dir.clone();
+        stop_node(miner).await;
+
+        let restarted = start_node_from_existing_dir(restart_data_dir, false).await?;
+        let restart_snapshot = node_snapshot(&restarted, &sender, &recipient).await;
+        assert_eq!(restart_snapshot, expected_snapshot);
+
+        for height in 33..=40 {
+            let _ = mine_and_apply_empty_block(
+                &live_peer.chain,
+                height,
+                0xE0u8.wrapping_add(height as u8),
+                "miner-b",
+            )
+            .await?;
+        }
+
+        sync_node_to_peer(&restarted, &live_peer_addr, 40).await?;
+
+        let restarted_snapshot = node_snapshot(&restarted, &sender, &recipient).await;
+        let live_peer_snapshot = node_snapshot(&live_peer, &sender, &recipient).await;
+        assert_eq!(restarted_snapshot, live_peer_snapshot);
+        assert_eq!(restarted_snapshot.0, 40);
+        assert_eq!(restarted_snapshot.4, 897u128);
+        assert_eq!(restarted_snapshot.5, 100u128);
+        assert_eq!(restarted_snapshot.6, 1u64);
+
+        stop_node(restarted).await;
+        stop_node(live_peer).await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn three_node_local_testnet_converges_with_reconnect() -> Result<()> {
         let miner = start_node(true).await?;
         let follower_b = start_node(false).await?;
@@ -516,9 +653,9 @@ mod tests {
         assert_ne!(miner.addr, follower_b.addr);
         assert_ne!(miner.addr, follower_c.addr);
         assert_ne!(follower_b.addr, follower_c.addr);
-        assert_ne!(miner.data_dir.path(), follower_b.data_dir.path());
-        assert_ne!(miner.data_dir.path(), follower_c.data_dir.path());
-        assert_ne!(follower_b.data_dir.path(), follower_c.data_dir.path());
+        assert_ne!(miner.data_dir.as_path(), follower_b.data_dir.as_path());
+        assert_ne!(miner.data_dir.as_path(), follower_c.data_dir.as_path());
+        assert_ne!(follower_b.data_dir.as_path(), follower_c.data_dir.as_path());
 
         let sender_key = signing_key(21);
         let sender = hex::encode(sender_key.verifying_key().to_bytes());
@@ -631,3 +768,6 @@ mod tests {
         Ok(())
     }
 }
+
+
+
