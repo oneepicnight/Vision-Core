@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::api::transactions::{submit_transaction as submit_transaction_service, TransactionSubmissionResult};
 use crate::chain::ChainState;
 use crate::mempool::Mempool;
+use crate::types::transaction::canonical_tx_id;
 use crate::miner::MinerManager;
 use crate::p2p::peer_manager::PeerManager;
 use crate::types::Tx;
@@ -37,6 +38,30 @@ pub(crate) struct NodeStatusSnapshot {
     pub mempool_size: usize,
     pub peer_count: usize,
     pub mining: MiningStatusSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AccountBalanceSnapshot {
+    pub address: String,
+    pub exists: bool,
+    pub balance: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AccountNonceSnapshot {
+    pub address: String,
+    pub exists: bool,
+    pub nonce: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TransactionLookupSnapshot {
+    pub tx_id: String,
+    pub found: bool,
+    pub block_hash: Option<String>,
+    pub block_height: Option<u64>,
+    pub tx_index: Option<usize>,
+    pub tx: Option<Tx>,
 }
 
 #[derive(Clone)]
@@ -119,7 +144,52 @@ impl NodeApiState {
             mining,
         }
     }
+    pub(crate) async fn balance_snapshot(&self, address: &str) -> AccountBalanceSnapshot {
+        let chain = self.chain.lock().await;
+        AccountBalanceSnapshot {
+            address: address.to_string(),
+            exists: chain.balances.contains_key(address),
+            balance: chain.balance_of(address),
+        }
+    }
+
+    pub(crate) async fn nonce_snapshot(&self, address: &str) -> AccountNonceSnapshot {
+        let chain = self.chain.lock().await;
+        AccountNonceSnapshot {
+            address: address.to_string(),
+            exists: chain.nonces.contains_key(address),
+            nonce: chain.nonce_of(address),
+        }
+    }
+
+    pub(crate) async fn transaction_snapshot(&self, tx_id: &str) -> TransactionLookupSnapshot {
+        let chain = self.chain.lock().await;
+        for (block_height, block) in chain.blocks.iter().enumerate() {
+            for (tx_index, tx) in block.txs.iter().enumerate() {
+                if canonical_tx_id(tx) == tx_id {
+                    return TransactionLookupSnapshot {
+                        tx_id: tx_id.to_string(),
+                        found: true,
+                        block_hash: Some(block.hash().to_string()),
+                        block_height: Some(block_height as u64),
+                        tx_index: Some(tx_index),
+                        tx: Some(tx.clone()),
+                    };
+                }
+            }
+        }
+
+        TransactionLookupSnapshot {
+            tx_id: tx_id.to_string(),
+            found: false,
+            block_hash: None,
+            block_height: None,
+            tx_index: None,
+            tx: None,
+        }
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
