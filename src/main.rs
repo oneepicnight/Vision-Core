@@ -1,11 +1,11 @@
-﻿//! vision-core â€” minimal stable blockchain node
+//! vision-core - minimal stable blockchain node
 //!
-//! `main.rs` is responsible only for startup wiring:
-//! - Parse settings from environment
-//! - Print startup banner
-//! - Initialise chain state and genesis
-//! - Start API and P2P services
-//! - Block on the Tokio runtime
+//! main.rs is responsible only for startup wiring:
+//! - parse settings from environment
+//! - print startup banner
+//! - initialise chain state and genesis
+//! - start API and P2P services
+//! - block on the Tokio runtime
 //!
 //! All protocol logic lives in the dedicated modules under `src/`.
 
@@ -22,14 +22,13 @@ mod tests;
 mod types;
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 use anyhow::Result;
+use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 use config::constants::*;
 use config::settings::Settings;
-
-// â”€â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn main() {
     let rt = node::runtime::build_runtime();
@@ -40,7 +39,6 @@ fn main() {
 }
 
 async fn async_main() -> Result<()> {
-    // â”€â”€ Logging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -48,16 +46,11 @@ async fn async_main() -> Result<()> {
         )
         .init();
 
-    // â”€â”€ Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let settings = Settings::from_env();
 
-    // â”€â”€ Banner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     print_banner(&settings);
 
-    // â”€â”€ Chain state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    let mut chain_state = chain::state::ChainState::open(&settings.data_dir)?;
-
-    // â”€â”€ Bootstrap (genesis validation + DB init) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    let mut chain_state = chain::state::ChainState::open_with_genesis(&settings.data_dir)?;
     node::bootstrap::bootstrap_chain(&mut chain_state, &settings)?;
 
     let chain = Arc::new(Mutex::new(chain_state));
@@ -67,17 +60,21 @@ async fn async_main() -> Result<()> {
         Arc::new(miner::MinerManager::new(*pow::visionx::VISIONX_PARAMS))
     });
 
-    // â”€â”€ Seed peers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let seed_addrs = node::bootstrap::seed_peers(&settings);
     for addr in &seed_addrs {
         peer_manager.upsert(addr, true);
     }
     tracing::info!("[NODE] {} seed peers loaded", seed_addrs.len());
 
-    // â”€â”€ Background services â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    node::services::start_services(chain.clone(), peer_manager.clone(), &settings).await?;
+    node::services::start_services(
+        chain.clone(),
+        peer_manager.clone(),
+        mempool.clone(),
+        miner_manager.clone(),
+        &settings,
+    )
+    .await?;
 
-    // â”€â”€ HTTP API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let mut api_state = api::state::NodeApiState::new(chain.clone(), mempool)
         .with_peer_manager(peer_manager.clone())
         .with_alpha_airdrop_enabled(settings.alpha_airdrop_enabled);
@@ -88,29 +85,23 @@ async fn async_main() -> Result<()> {
     let http_addr: std::net::SocketAddr = settings.http_addr.parse()?;
     tracing::info!("[API] Listening on http://{}", http_addr);
 
-    axum::serve(
-        tokio::net::TcpListener::bind(http_addr).await?,
-        app,
-    )
-    .await?;
+    axum::serve(tokio::net::TcpListener::bind(http_addr).await?, app).await?;
 
     Ok(())
 }
 
-// â”€â”€â”€ Startup banner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 fn print_banner(settings: &Settings) {
     println!(
         r#"
-â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-â•‘            vision-core  {}
-â•‘
-â•‘  Network  : {}
-â•‘  P2P      : {}
-â•‘  API      : {}
-â•‘  Mining   : {}
-â•‘  Data     : {}
-â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
++--------------------------------------------------------------+
+|                      vision-core {}                       |
+|
+|  Network  : {}
+|  P2P      : {}
+|  API      : {}
+|  Mining   : {}
+|  Data     : {}
++--------------------------------------------------------------+
 "#,
         NODE_VERSION,
         NETWORK_ID,
@@ -121,8 +112,3 @@ fn print_banner(settings: &Settings) {
     );
     tracing::info!("vision-core {} starting", NODE_VERSION);
 }
-
-
-
-
-
