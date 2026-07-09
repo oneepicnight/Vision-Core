@@ -1,3 +1,4 @@
+pub mod alpha;
 pub mod mining;
 pub mod peers;
 pub mod read_only;

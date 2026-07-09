@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     Json,
 };
@@ -111,6 +111,7 @@ mod tests {
             p2p_addr: "127.0.0.1:0".to_string(),
             mining_enabled: false,
             mining_threads: 0,
+            alpha_airdrop_enabled: false,
             seed_peers: vec![],
         }
     }

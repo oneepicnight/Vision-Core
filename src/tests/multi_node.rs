@@ -1,4 +1,4 @@
-#[cfg(test)]
+﻿#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
@@ -62,6 +62,7 @@ mod tests {
             p2p_addr: addr.to_string(),
             mining_enabled: false,
             mining_threads: 0,
+            alpha_airdrop_enabled: false,
             seed_peers: vec![],
         }
     }
@@ -768,6 +769,10 @@ mod tests {
         Ok(())
     }
 }
+
+
+
+
 
 
 

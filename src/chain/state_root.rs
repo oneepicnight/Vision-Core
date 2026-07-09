@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+﻿use std::collections::BTreeMap;
 
 const STATE_ROOT_MAGIC: &[u8; 6] = b"VSTATE";
 const STATE_ROOT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum StateRootError {
+pub(crate) enum StateRootError {
     MalformedAccountKey,
     MixedCaseAccountKey,
 }
@@ -91,7 +91,7 @@ fn append_nonces(
     Ok(())
 }
 
-pub(super) fn canonical_state_vector(
+pub(crate) fn canonical_state_vector(
     balances: &BTreeMap<String, u128>,
     nonces: &BTreeMap<String, u64>,
 ) -> Result<Vec<u8>, StateRootError> {
@@ -102,7 +102,7 @@ pub(super) fn canonical_state_vector(
     Ok(out)
 }
 
-pub(super) fn compute_state_root(
+pub(crate) fn compute_state_root(
     balances: &BTreeMap<String, u128>,
     nonces: &BTreeMap<String, u64>,
 ) -> Result<String, StateRootError> {
@@ -267,3 +267,5 @@ mod tests {
         assert_ne!(root1, root2);
     }
 }
+
+

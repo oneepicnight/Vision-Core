@@ -1,10 +1,11 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::api::mining::MiningInfoResponse;
 use crate::api::transactions::{submit_transaction as submit_transaction_service, TransactionSubmissionResult};
-use crate::chain::ChainState;
+use crate::chain::{snapshots::save_snapshot, state_root::compute_state_root, ChainState};
 use crate::mempool::Mempool;
 use crate::types::transaction::canonical_tx_id;
 use crate::miner::MinerManager;
@@ -64,12 +65,32 @@ pub(crate) struct TransactionLookupSnapshot {
     pub tx: Option<Tx>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AlphaAirdropSnapshot {
+    pub status: &'static str,
+    pub scope: &'static str,
+    pub address: String,
+    pub amount: u128,
+    pub balance: u128,
+    pub canonical_tip_height: u64,
+    pub cached_state_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AlphaAirdropError {
+    Disabled,
+    InvalidAddress,
+    ZeroAmount,
+    StateRootComputationFailed,
+    SnapshotPersistenceFailed,
+}
 #[derive(Clone)]
 pub(crate) struct NodeApiState {
     chain: Arc<Mutex<ChainState>>,
     mempool: Arc<Mempool>,
     peer_manager: Option<Arc<PeerManager>>,
     miner_manager: Option<Arc<MinerManager>>,
+    alpha_airdrop_enabled: bool,
 }
 
 impl NodeApiState {
@@ -79,6 +100,7 @@ impl NodeApiState {
             mempool,
             peer_manager: None,
             miner_manager: None,
+            alpha_airdrop_enabled: false,
         }
     }
 
@@ -86,10 +108,22 @@ impl NodeApiState {
         self.peer_manager = Some(peer_manager);
         self
     }
-
     pub(crate) fn with_miner_manager(mut self, miner_manager: Arc<MinerManager>) -> Self {
         self.miner_manager = Some(miner_manager);
         self
+    }
+
+    pub(crate) fn with_alpha_airdrop_enabled(mut self, enabled: bool) -> Self {
+        self.alpha_airdrop_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn has_miner_manager(&self) -> bool {
+        self.miner_manager.is_some()
+    }
+
+    pub(crate) fn alpha_airdrop_enabled(&self) -> bool {
+        self.alpha_airdrop_enabled
     }
 
     pub(crate) async fn submit_transaction(&self, tx: Tx) -> TransactionSubmissionResult {
@@ -144,6 +178,21 @@ impl NodeApiState {
             mining,
         }
     }
+    pub(crate) async fn mining_info_snapshot(&self) -> MiningInfoResponse {
+        let (height, difficulty) = {
+            let chain = self.chain.lock().await;
+            (chain.current_height(), chain.difficulty)
+        };
+
+        MiningInfoResponse {
+            enabled: self.has_miner_manager(),
+            height,
+            difficulty,
+            epoch: crate::pow::visionx::VISIONX_PARAMS.epoch(height),
+            hash_rate_estimate: None,
+        }
+    }
+
     pub(crate) async fn balance_snapshot(&self, address: &str) -> AccountBalanceSnapshot {
         let chain = self.chain.lock().await;
         AccountBalanceSnapshot {
@@ -188,8 +237,61 @@ impl NodeApiState {
             tx: None,
         }
     }
-}
 
+    pub(crate) async fn alpha_airdrop(
+        &self,
+        address: &str,
+        amount: u128,
+    ) -> Result<AlphaAirdropSnapshot, AlphaAirdropError> {
+        if !self.alpha_airdrop_enabled {
+            return Err(AlphaAirdropError::Disabled);
+        }
+        if address.len() != 64 || !address.as_bytes().iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(AlphaAirdropError::InvalidAddress);
+        }
+        if amount == 0 {
+            return Err(AlphaAirdropError::ZeroAmount);
+        }
+
+        let mut chain = self.chain.lock().await;
+        let previous_balance = chain.balances.get(address).copied();
+        let previous_cached_state_root = chain.cached_state_root.clone();
+
+        chain.credit_balance(address, amount);
+
+        let result = (|| -> Result<AlphaAirdropSnapshot, AlphaAirdropError> {
+            let height = chain.current_height();
+            let state_root = compute_state_root(&chain.balances, &chain.nonces)
+                .map_err(|_| AlphaAirdropError::StateRootComputationFailed)?;
+            chain.cached_state_root = Some((height, state_root.clone()));
+            save_snapshot(&chain, height).map_err(|_| AlphaAirdropError::SnapshotPersistenceFailed)?;
+
+            Ok(AlphaAirdropSnapshot {
+                status: "accepted",
+                scope: "alpha_dev_only",
+                address: address.to_string(),
+                amount,
+                balance: chain.balance_of(address),
+                canonical_tip_height: height,
+                cached_state_root: state_root,
+            })
+        })();
+
+        if result.is_err() {
+            match previous_balance {
+                Some(balance) => {
+                    chain.balances.insert(address.to_string(), balance);
+                }
+                None => {
+                    chain.balances.remove(address);
+                }
+            }
+            chain.cached_state_root = previous_cached_state_root;
+        }
+
+        result
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -335,5 +437,19 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

@@ -1,6 +1,6 @@
-pub mod accept;
+﻿pub mod accept;
 pub mod orphan;
-mod state_root;
+pub(crate) mod state_root;
 pub mod reorg;
 pub mod snapshots;
 pub mod state;
@@ -8,3 +8,5 @@ pub mod storage;
 
 pub use state::ChainState;
 pub use accept::{apply_block, verify_pow_only, AcceptResult};
+
+

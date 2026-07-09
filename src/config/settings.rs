@@ -19,6 +19,9 @@ pub struct Settings {
     /// Number of mining worker threads (0 = use logical CPU count).
     pub mining_threads: usize,
 
+    /// Whether the Alpha-only local airdrop endpoint is enabled.
+    pub alpha_airdrop_enabled: bool,
+
     /// Seed peer addresses to connect to on startup.
     pub seed_peers: Vec<String>,
 }
@@ -49,6 +52,9 @@ impl Default for Settings {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            alpha_airdrop_enabled: std::env::var("VISION_ALPHA_AIRDROP_ENABLED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
             seed_peers: DEFAULT_SEED_PEERS.iter().map(|s| s.to_string()).collect(),
         }
     }
