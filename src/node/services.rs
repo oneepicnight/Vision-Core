@@ -15,6 +15,7 @@ use crate::miner::MinerManager;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
+use crate::p2p::sync::SyncGuard;
 use crate::p2p::protocol::{validate_handshake, HandshakeMessage, HandshakeResult};
 use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionState};
 
@@ -174,6 +175,7 @@ async fn seed_peer_loop(
 ) {
     let reconnect_delay = Duration::from_secs(2);
     let heartbeat_delay = Duration::from_secs(5);
+    let mut sync_guard = SyncGuard::new();
 
     let peer_socket: SocketAddr = match peer_addr.parse() {
         Ok(addr) => addr,
@@ -224,6 +226,13 @@ async fn seed_peer_loop(
                         peer_manager.upsert(&peer_addr, true);
                         peer_manager.set_state(&peer_addr, PeerState::Connected);
                         peer_manager.note_peer_height(&peer_addr, remote_hs.chain_height, false);
+                        let local_height = chain.lock().await.current_height();
+                        tracing::info!(
+                            "[P2P] {} handshake complete local_height={} remote_height={}",
+                            peer_addr,
+                            local_height,
+                            remote_hs.chain_height
+                        );
                     }
                     other => {
                         let reason = match other {
@@ -245,6 +254,43 @@ async fn seed_peer_loop(
                 }
 
                 loop {
+                    let remote_height = match poll_peer_height(&mut stream, &peer_addr, &chain, &peer_manager).await {
+                        Ok(height) => height,
+                        Err(e) => {
+                            tracing::debug!("[P2P] {} height poll error: {}", peer_addr, e);
+                            break;
+                        }
+                    };
+                    let local_height = chain.lock().await.current_height();
+                    tracing::debug!(
+                        "[SYNC] height compare peer={} local={} remote={} lag={}",
+                        peer_addr,
+                        local_height,
+                        remote_height,
+                        remote_height.saturating_sub(local_height)
+                    );
+                    if remote_height > local_height {
+                        let lag = remote_height - local_height;
+                        tracing::info!(
+                            "[SYNC] lagging peer={} local_height={} remote_height={} lag={}",
+                            peer_addr,
+                            local_height,
+                            remote_height,
+                            lag
+                        );
+                        if let Err(e) = crate::p2p::sync::watchdog_step(
+                            &conn_mgr,
+                            &chain,
+                            &peer_manager,
+                            &mut sync_guard,
+                        )
+                        .await
+                        {
+                            tracing::warn!("[SYNC] catch-up trigger error for {}: {}", peer_addr, e);
+                            break;
+                        }
+                    }
+
                     tokio::time::sleep(heartbeat_delay).await;
                     let ping = P2PMessage::Ping {
                         timestamp: unix_timestamp_secs(),
@@ -286,9 +332,85 @@ async fn seed_peer_loop(
     }
 }
 
+async fn poll_peer_height(
+    stream: &mut (impl tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin),
+    peer_addr: &str,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_manager: &Arc<PeerManager>,
+) -> Result<u64> {
+    send_message(stream, &P2PMessage::GetHeight).await?;
+    let (remote_height, remote_tip_hash) = match recv_message(stream).await? {
+        P2PMessage::Height { height, tip_hash } => (height, tip_hash),
+        P2PMessage::Disconnect { reason } => {
+            return Err(anyhow::anyhow!("peer rejected height query: {}", reason))
+        }
+        other => return Err(anyhow::anyhow!("unexpected height reply: {}", other.label())),
+    };
+    peer_manager.note_peer_height(peer_addr, remote_height, false);
+    let local_height = chain.lock().await.current_height();
+    tracing::debug!(
+        "[P2P] {} learned remote height={} local_height={} tip_hash={:?}",
+        peer_addr,
+        remote_height,
+        local_height,
+        remote_tip_hash
+    );
+    Ok(remote_height)
+}
+
 fn unix_timestamp_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p2p::messages::P2PMessage;
+    use crate::p2p::peer_manager::PeerState;
+    use tokio::io::duplex;
+    use tokio::task::JoinHandle;
+
+    fn temp_chain() -> Arc<Mutex<ChainState>> {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        Arc::new(Mutex::new(ChainState::empty(db)))
+    }
+
+    fn temp_peer_manager() -> Arc<PeerManager> {
+        Arc::new(PeerManager::new())
+    }
+
+    async fn scripted_height_peer(height: u64) -> (tokio::io::DuplexStream, JoinHandle<()>) {
+        let (client, mut server) = duplex(4096);
+        let handle = tokio::spawn(async move {
+            match recv_message(&mut server).await.unwrap() {
+                P2PMessage::GetHeight => {
+                    send_message(
+                        &mut server,
+                        &P2PMessage::Height { height, tip_hash: Some(format!("{:064x}", height)) },
+                    ).await.unwrap();
+                }
+                other => panic!("expected height request, got {:?}", other),
+            }
+        });
+        (client, handle)
+    }
+
+    #[tokio::test]
+    async fn poll_peer_height_records_remote_height() {
+        let chain = temp_chain();
+        let pm = temp_peer_manager();
+        let peer_addr = "127.0.0.1:19099";
+        pm.upsert(peer_addr, true);
+        pm.set_state(peer_addr, PeerState::Connected);
+        let (mut client, handle) = scripted_height_peer(42).await;
+        let remote_height = poll_peer_height(&mut client, peer_addr, &chain, &pm).await.unwrap();
+        assert_eq!(remote_height, 42);
+        assert_eq!(pm.best_remote_height(), 42);
+        handle.await.unwrap();
+    }
+}
+

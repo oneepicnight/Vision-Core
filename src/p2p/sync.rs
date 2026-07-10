@@ -1,4 +1,4 @@
-﻿use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -76,6 +76,8 @@ async fn live_sync_from_peer(
     let mut stream = P2PConnectionManager::connect(peer_socket).await?;
     let local_nonce = conn_mgr.local_node_nonce();
     let local_height = chain.lock().await.current_height();
+    let remote_height = peer_manager.best_remote_height();
+    tracing::debug!("[SYNC] height snapshot local={} remote={}", local_height, remote_height);
 
     send_message(&mut stream, &P2PMessage::Handshake(HandshakeMessage::new(local_height, local_nonce))).await?;
     let remote_hs = match recv_message(&mut stream).await? {
@@ -88,6 +90,7 @@ async fn live_sync_from_peer(
         other => return Err(anyhow!("sync handshake rejected: {:?}", other)),
     }
     peer_manager.note_peer_height(peer_addr, remote_hs.chain_height, false);
+    tracing::info!("[SYNC] starting catchup from {} handshake remote_height={} local_height={}", peer_addr, remote_hs.chain_height, local_height);
 
     send_message(&mut stream, &P2PMessage::GetHeight).await?;
     let (remote_height, remote_tip_hash) = match recv_message(&mut stream).await? {
@@ -98,9 +101,11 @@ async fn live_sync_from_peer(
     peer_manager.note_peer_height(peer_addr, remote_height, false);
 
     if remote_height <= local_height {
+        tracing::debug!("[SYNC] {} already synced local_height={} remote_height={}", peer_addr, local_height, remote_height);
         return Ok(0);
     }
 
+    tracing::info!("[SYNC] requesting block range {}..={} from {}", local_height + 1, remote_height, peer_addr);
     let mut current_hash = remote_tip_hash.ok_or_else(|| anyhow!("peer reported no tip hash at height {}", remote_height))?;
     let mut fetched = Vec::new();
     let mut seen = HashSet::new();
@@ -135,6 +140,7 @@ async fn live_sync_from_peer(
     }
 
     fetched.reverse();
+    tracing::info!("[SYNC] received {} blocks from {}", fetched.len(), peer_addr);
     let mut imported = 0usize;
     for block in fetched {
         let result = {
@@ -143,6 +149,7 @@ async fn live_sync_from_peer(
         };
         match result {
             AcceptResult::CanonExtension { .. } | AcceptResult::SideChain { .. } => {
+                tracing::debug!("[SYNC] imported block height={} hash={}", block.header.number, block.hash());
                 imported += 1;
             }
             AcceptResult::StoredOrphan { block_hash } => {
@@ -154,6 +161,7 @@ async fn live_sync_from_peer(
         }
     }
 
+    tracing::info!("[SYNC] imported {} blocks from {}", imported, peer_addr);
     Ok(imported)
 }
 
@@ -169,12 +177,14 @@ pub async fn watchdog_step(
     }
 
     let local_height = chain.lock().await.current_height();
+    let remote_height = peer_manager.best_remote_height();
+    tracing::debug!("[SYNC] height snapshot local={} remote={}", local_height, remote_height);
     match should_sync(peer_manager, local_height) {
         SyncDecision::Synced => {
             tracing::trace!("[SYNC] up to date (local h={})", local_height);
         }
         SyncDecision::Behind { peer_addr, lag } => {
-            tracing::info!("[SYNC] starting catchup from {} lag={} local h={}", peer_addr, lag, local_height);
+            tracing::info!("[SYNC] starting catchup from {} lag={} local h={} remote h={}", peer_addr, lag, local_height, remote_height);
             if lag >= SYNC_CLEAR_JOB_MIN_LAG {
                 tracing::info!("[SYNC] clearing miner job (lag={})", lag);
             }
@@ -603,6 +613,8 @@ mod tests {
         valid_task.await.unwrap();
     }
 }
+
+
 
 
 

@@ -195,6 +195,12 @@ async fn handle_inbound<S>(
                                 peer_manager.upsert(&addr.to_string(), false);
                                 peer_manager.set_state(&addr.to_string(), PeerState::Connected);
                                 peer_manager.note_peer_height(&addr.to_string(), remote_hs.chain_height, false);
+                                tracing::info!(
+                                    "[P2P] {} handshake complete local_height={} remote_height={}",
+                                    addr,
+                                    our_height,
+                                    remote_hs.chain_height
+                                );
                                 if let Err(e) = send_message(&mut stream, &P2PMessage::Handshake(local_hs)).await {
                                     tracing::warn!("[P2P] {} handshake send error: {}", addr, e);
                                     break;
@@ -464,7 +470,7 @@ mod tests {
             local_nonce,
         ));
 
-        let remote = HandshakeMessage::new(0, local_nonce + 1);
+        let remote = HandshakeMessage::new(17, local_nonce + 1);
         send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
         let reply = recv_message(&mut client).await.unwrap();
         let local_hs = accepted_handshake_response(reply, local_nonce);
@@ -479,8 +485,8 @@ mod tests {
         drop(client);
         timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
         assert_eq!(peer_manager.connected_count(), 1);
+        assert_eq!(peer_manager.best_remote_height(), 17);
     }
-
     #[tokio::test]
     async fn inbound_handshake_rejects_wrong_chain_id() {
         let addr: SocketAddr = "127.0.0.1:19002".parse().unwrap();
@@ -641,4 +647,5 @@ mod tests {
         timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
     }
 }
+
 
