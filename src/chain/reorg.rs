@@ -1,3 +1,4 @@
+use crate::chain::accept::apply_coinbase_reward;
 use crate::chain::ChainState;
 use crate::config::constants::MAX_REORG;
 use crate::types::Block;
@@ -59,6 +60,7 @@ enum SideStateReconstructionError {
         got_parent: String,
     },
     Execution(TxExecutionError),
+    CoinbaseReward(String),
     StateRootConstructionFailed,
     StateRootMismatch {
         block_hash: String,
@@ -80,6 +82,8 @@ fn reconstruct_canonical_state_at_height(
         }
 
         if blk.header.number != 0 {
+            apply_coinbase_reward(&mut state, &blk.header.miner, blk.header.number)
+                .map_err(SideStateReconstructionError::CoinbaseReward)?;
             let computed_root = compute_state_root(&state.balances, &state.nonces)
                 .map_err(|_| SideStateReconstructionError::StateRootConstructionFailed)?;
             if computed_root != blk.header.state_root {
@@ -117,6 +121,8 @@ fn reconstruct_branch_state(
         }
 
         if blk.header.number != 0 {
+            apply_coinbase_reward(&mut state, &blk.header.miner, blk.header.number)
+                .map_err(SideStateReconstructionError::CoinbaseReward)?;
             let computed_root = compute_state_root(&state.balances, &state.nonces)
                 .map_err(|_| SideStateReconstructionError::StateRootConstructionFailed)?;
             if computed_root != blk.header.state_root {
@@ -362,6 +368,10 @@ mod tests {
         for tx in block.txs.iter().skip(1) {
             crate::types::transaction::simulate_tx_execution(&mut state, tx).unwrap();
         }
+        if block.header.number != 0 {
+            apply_coinbase_reward(&mut state, &block.header.miner, block.header.number)
+                .expect("test state should credit coinbase reward");
+        }
         state
     }
 
@@ -383,6 +393,8 @@ mod tests {
         for tx in blk.txs.iter().skip(1) {
             crate::types::transaction::simulate_tx_execution(&mut exec_state, tx).ok();
         }
+        apply_coinbase_reward(&mut exec_state, &blk.header.miner, blk.header.number)
+            .expect("test helper should be able to credit coinbase reward");
         blk.header.state_root = compute_state_root(&exec_state.balances, &exec_state.nonces)
             .expect("test helper should compute a valid state root");
         rehash_block(&mut blk);
@@ -402,6 +414,26 @@ mod tests {
 
     /// Build a short canonical chain of `n` blocks on top of genesis.
     /// Returns the state and a Vec of all blocks including genesis.
+    fn reward_only_block(
+        parent_hash: &str,
+        height: u64,
+        timestamp: u64,
+        slot: u8,
+        miner: &str,
+        balances: &std::collections::BTreeMap<String, u128>,
+        nonces: &std::collections::BTreeMap<String, u64>,
+    ) -> Block {
+        let mut blk = make_test_block(parent_hash, height, timestamp, slot);
+        blk.header.miner = miner.to_string();
+        let mut state = TxExecutionState::from_balances_and_nonces(
+            balances.clone(),
+            nonces.clone(),
+        );
+        apply_coinbase_reward(&mut state, miner, height).unwrap();
+        blk.header.state_root = compute_state_root(&state.balances, &state.nonces).unwrap();
+        rehash_block(&mut blk);
+        blk
+    }
     fn build_chain(n: u64) -> (ChainState, Vec<Block>) {
         let mut g = temp_state();
         let gen = genesis_block();
@@ -742,6 +774,57 @@ mod tests {
     /// Fork at genesis: two competing b1 candidates.
     /// The heavier one (after try_reorg is called from apply_block) wins.
     #[test]
+    fn reorg_replay_removes_demoted_reward_and_applies_winning_rewards() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+        let miner_a = "11".repeat(32);
+        let miner_b = "22".repeat(32);
+        let empty_balances = std::collections::BTreeMap::new();
+        let empty_nonces = std::collections::BTreeMap::new();
+        let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
+
+        let canonical = reward_only_block(
+            gen.hash(), 1, ts, 0xAA, &miner_a, &empty_balances, &empty_nonces,
+        );
+        assert_eq!(
+            apply_block(&mut g, &canonical, None),
+            AcceptResult::CanonExtension { height: 1 },
+        );
+        assert_eq!(g.balance_of(&miner_a), crate::miner::block_reward(1));
+
+        let side_1 = reward_only_block(
+            gen.hash(), 1, ts, 0xAB, &miner_b, &empty_balances, &empty_nonces,
+        );
+        assert_eq!(
+            apply_block(&mut g, &side_1, None),
+            AcceptResult::SideChain { height: 1 },
+        );
+        let side_parent_balances = std::collections::BTreeMap::from([(
+            miner_b.clone(),
+            crate::miner::block_reward(1),
+        )]);
+        let side_2 = reward_only_block(
+            side_1.hash(),
+            2,
+            ts + TARGET_BLOCK_TIME,
+            0xAC,
+            &miner_b,
+            &side_parent_balances,
+            &empty_nonces,
+        );
+        assert_eq!(
+            apply_block(&mut g, &side_2, None),
+            AcceptResult::CanonExtension { height: 2 },
+        );
+
+        assert_eq!(g.balance_of(&miner_a), 0);
+        assert_eq!(
+            g.balance_of(&miner_b),
+            crate::miner::block_reward(1) + crate::miner::block_reward(2),
+        );
+    }
+    #[test]
     fn reorg_switches_to_heavier_chain() {
         let mut g = temp_state();
         let gen = genesis_block();
@@ -788,7 +871,10 @@ mod tests {
                 canonical_block_hashes(&g),
                 vec![gen.hash().to_string(), b1p.hash().to_string(), b2p.hash().to_string()]
             );
-            assert_eq!(g.balances, before_balances);
+            let expected_reward = crate::miner::block_reward(1)
+                + crate::miner::block_reward(2);
+            assert_eq!(g.balance_of(&"0".repeat(64)), expected_reward);
+            assert_ne!(g.balances, before_balances);
             assert_eq!(g.nonces, before_nonces);
             assert_eq!(before_blocks, vec![gen.hash().to_string(), b1.hash().to_string()]);
             assert_eq!(before_cached_root, None);

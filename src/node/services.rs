@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use tokio::sync::Mutex;
 
-use crate::chain::accept::AcceptResult;
+use crate::chain::accept::{apply_coinbase_reward, AcceptResult};
 use crate::chain::state_root::compute_state_root;
 use crate::chain::ChainState;
 use crate::config::constants::{BLOCK_TARGET_TXS, MIN_PEERS_FOR_MINING};
@@ -74,7 +74,7 @@ pub async fn start_services(
             let chain_ref = chain.clone();
             let peer_manager_ref = peer_manager.clone();
             let mempool_ref = mempool.clone();
-            let miner_addr = settings.p2p_addr.clone();
+            let miner_addr = settings.miner_address.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_millis(250));
                 loop {
@@ -98,6 +98,12 @@ pub async fn start_services(
                             for tx in job.txs.iter().skip(1) {
                                 simulate_tx_execution(&mut exec_state, tx).ok()?;
                             }
+                            apply_coinbase_reward(
+                                &mut exec_state,
+                                &job.header_template.miner,
+                                job.header_template.number,
+                            )
+                            .ok()?;
                             let state_root = compute_state_root(&exec_state.balances, &exec_state.nonces).ok()?;
                             job.header_template.state_root = state_root;
                             Some(job)

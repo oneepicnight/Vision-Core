@@ -1,4 +1,4 @@
-﻿use axum::{body::Bytes, extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{body::Bytes, extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::api::state::{AlphaAirdropError, AlphaAirdropSnapshot, NodeApiState};
@@ -170,6 +170,7 @@ mod tests {
             data_dir: dir.display().to_string(),
             http_addr: "127.0.0.1:0".to_string(),
             p2p_addr: "127.0.0.1:0".to_string(),
+            miner_address: "0".repeat(64),
             mining_enabled: false,
             mining_threads: 0,
             alpha_airdrop_enabled: enabled,

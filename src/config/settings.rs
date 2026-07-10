@@ -13,6 +13,9 @@ pub struct Settings {
     /// P2P listen address.
     pub p2p_addr: String,
 
+    /// Canonical reward recipient used by the miner.
+    pub miner_address: String,
+
     /// Whether this node should attempt to mine blocks.
     pub mining_enabled: bool,
 
@@ -45,6 +48,7 @@ impl Default for Settings {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(DEFAULT_P2P_PORT)
             ),
+            miner_address: parse_miner_address(std::env::var("VISION_MINER_ADDRESS").ok()),
             mining_enabled: std::env::var("VISION_MINING")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
@@ -55,7 +59,7 @@ impl Default for Settings {
             alpha_airdrop_enabled: std::env::var("VISION_ALPHA_AIRDROP_ENABLED")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
-            seed_peers: DEFAULT_SEED_PEERS.iter().map(|s| s.to_string()).collect(),
+            seed_peers: parse_seed_peers(std::env::var("VISION_SEED_PEERS").ok()),
         }
     }
 }
@@ -65,5 +69,66 @@ impl Settings {
     /// config file if `VISION_CONFIG` is set.
     pub fn from_env() -> Self {
         Self::default()
+    }
+}
+
+fn parse_seed_peers(raw: Option<String>) -> Vec<String> {
+    match raw {
+        Some(raw) => raw
+            .split([',', ';', '\n'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        None => DEFAULT_SEED_PEERS.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn parse_miner_address(raw: Option<String>) -> String {
+    let zero_address = "0".repeat(64);
+    let Some(raw) = raw else {
+        return zero_address;
+    };
+
+    let is_valid = raw.len() == 64
+        && raw
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+
+    if is_valid {
+        raw
+    } else {
+        zero_address
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_seed_peers;
+
+    #[test]
+    fn parse_seed_peers_uses_defaults_when_unset() {
+        let peers = parse_seed_peers(None);
+        assert!(!peers.is_empty());
+    }
+
+    #[test]
+    fn parse_seed_peers_allows_empty_override() {
+        let peers = parse_seed_peers(Some(String::new()));
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn parse_seed_peers_splits_and_trims() {
+        let peers = parse_seed_peers(Some(" 127.0.0.1:7072 , 10.0.0.1:8080;\n192.168.1.1:9000 ".to_string()));
+        assert_eq!(
+            peers,
+            vec![
+                "127.0.0.1:7072".to_string(),
+                "10.0.0.1:8080".to_string(),
+                "192.168.1.1:9000".to_string(),
+            ]
+        );
     }
 }

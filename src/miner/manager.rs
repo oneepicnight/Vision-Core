@@ -1,7 +1,9 @@
-use crate::chain::accept::{apply_block, AcceptResult};
+use crate::chain::accept::{apply_block, apply_coinbase_reward, AcceptResult};
+use crate::chain::state_root::compute_state_root;
 use crate::chain::ChainState;
 use crate::miner::job::{build_candidate_with_params, MiningJob};
 use crate::pow::visionx::VisionXParams;
+use crate::types::transaction::{simulate_tx_execution, TxExecutionState};
 use crate::types::Tx;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -158,7 +160,7 @@ impl MinerManager {
             .collect();
 
         let job_id = Self::next_job_id();
-        Some(build_candidate_with_params(
+        let mut job = build_candidate_with_params(
             tip,
             job_id,
             miner_addr,
@@ -166,7 +168,20 @@ impl MinerManager {
             &window,
             now,
             self.params,
-        ))
+        );
+
+        let mut state = TxExecutionState::from_balances_and_nonces(
+            g.balances.clone(),
+            g.nonces.clone(),
+        );
+        for tx in job.txs.iter().skip(1) {
+            simulate_tx_execution(&mut state, tx).ok()?;
+        }
+        apply_coinbase_reward(&mut state, miner_addr, tip.header.number + 1).ok()?;
+        job.header_template.state_root =
+            compute_state_root(&state.balances, &state.nonces).ok()?;
+        job.header_bytes = MiningJob::encode_header(&job.header_template);
+        Some(job)
     }
 }
 
@@ -211,7 +226,7 @@ mod tests {
         let m = default_manager();
         let g = seeded_state();
         let job = m
-            .build_candidate_for_tip(&g, "addr1", vec![])
+            .build_candidate_for_tip(&g, &"11".repeat(32), vec![])
             .expect("should produce a job when chain has genesis");
         m.build_job(job);
         assert!(m.is_mining());
@@ -238,10 +253,16 @@ mod tests {
     fn build_candidate_has_correct_parent_and_height() {
         let m = default_manager();
         let g = seeded_state();
-        let job = m.build_candidate_for_tip(&g, "miner", vec![]).unwrap();
+        let job = m.build_candidate_for_tip(&g, &"22".repeat(32), vec![]).unwrap();
         let gen = genesis_block();
         assert_eq!(job.header_template.number, 1);
         assert_eq!(job.header_template.parent_hash, gen.hash());
+        let mut expected_state = TxExecutionState::new();
+        apply_coinbase_reward(&mut expected_state, &"22".repeat(32), 1).unwrap();
+        assert_eq!(
+            job.header_template.state_root,
+            compute_state_root(&expected_state.balances, &expected_state.nonces).unwrap(),
+        );
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────

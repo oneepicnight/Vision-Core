@@ -185,6 +185,23 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_restore_preserves_coinbase_reward_balance() {
+        let (mut g, blocks) = build_chain_n(1);
+        let miner = "0".repeat(64);
+        let expected_reward = crate::miner::block_reward(1);
+        let expected_root = blocks[1].header.state_root.clone();
+        assert_eq!(g.balance_of(&miner), expected_reward);
+
+        save_snapshot(&g, 1).unwrap();
+        g.balances.clear();
+        g.nonces.clear();
+        g.cached_state_root = None;
+        restore_latest_snapshot(&mut g, 1).unwrap();
+
+        assert_eq!(g.balance_of(&miner), expected_reward);
+        assert_eq!(g.cached_state_root, Some((1, expected_root)));
+    }
+    #[test]
     fn save_snapshot_persists_balances() {
         let mut g = temp_state();
         let gen = genesis_block();
