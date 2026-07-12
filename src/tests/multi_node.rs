@@ -24,7 +24,7 @@ mod tests {
     use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
     use crate::config::settings::Settings;
     use crate::mempool::Mempool;
-    use crate::node::bootstrap::bootstrap_chain;
+    use crate::node::bootstrap::initialize_chain_state;
     use crate::p2p::connection::P2PConnectionManager;
     use crate::p2p::peer_manager::{PeerManager, PeerState};
     use crate::p2p::sync::{watchdog_step, SyncGuard};
@@ -78,13 +78,9 @@ mod tests {
         let addr = fresh_port();
         let settings = node_settings(&data_dir, addr);
 
-        let mut chain_state = ChainState::open_with_genesis(&settings.data_dir)?;
-        bootstrap_chain(&mut chain_state, &settings)?;
+        let chain_state = initialize_chain_state(&settings)?;
         let genesis_hash = chain_state.block_at(0).unwrap().hash().to_string();
-        crate::chain::storage::store_height_index(&chain_state, 0, &genesis_hash)?;
-
-        let current_height = chain_state.current_height();
-        let _ = crate::chain::snapshots::restore_latest_snapshot(&mut chain_state, current_height);
+        assert_eq!(crate::chain::storage::load_height_index(&chain_state, 0)?.as_deref(), Some(genesis_hash.as_str()));
 
         let chain = Arc::new(Mutex::new(chain_state));
         let mempool = Arc::new(Mempool::new());
@@ -649,6 +645,17 @@ mod tests {
         let restarted = start_node_from_existing_dir(restart_data_dir, false).await?;
         let restart_snapshot = node_snapshot(&restarted, &sender, &recipient).await;
         assert_eq!(restart_snapshot, expected_snapshot);
+        {
+            let guard = restarted.chain.lock().await;
+            assert_eq!(
+                crate::chain::storage::load_height_index(&guard, 0)?.as_deref(),
+                Some(crate::genesis::GENESIS_HASH)
+            );
+            assert_eq!(
+                crate::chain::storage::load_height_index(&guard, 32)?.as_deref(),
+                Some(restart_snapshot.1.as_str())
+            );
+        }
 
         for height in 33..=40 {
             let _ = mine_and_apply_empty_block(
@@ -798,6 +805,10 @@ mod tests {
         Ok(())
     }
 }
+
+
+
+
 
 
 

@@ -50,8 +50,7 @@ async fn async_main() -> Result<()> {
 
     print_banner(&settings);
 
-    let mut chain_state = chain::state::ChainState::open_with_genesis(&settings.data_dir)?;
-    node::bootstrap::bootstrap_chain(&mut chain_state, &settings)?;
+    let chain_state = node::bootstrap::initialize_chain_state(&settings)?;
 
     let chain = Arc::new(Mutex::new(chain_state));
     let peer_manager = Arc::new(p2p::peer_manager::PeerManager::new());
@@ -112,3 +111,4 @@ fn print_banner(settings: &Settings) {
     );
     tracing::info!("vision-core {} starting", NODE_VERSION);
 }
+
