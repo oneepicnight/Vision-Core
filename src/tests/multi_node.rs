@@ -1,11 +1,14 @@
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::sync::Arc;
     use std::path::{Path, PathBuf};
 
     use anyhow::{anyhow, Result};
+    use serde::{Deserialize, Serialize};
     use axum::body::{self, Bytes};
     use axum::extract::State;
     use crate::api::transactions::submit_transaction_http;
@@ -329,7 +332,11 @@ mod tests {
 
         let result = {
             let mut guard = chain.lock().await;
-            apply_block(&mut guard, &block, None)
+            let result = apply_block(&mut guard, &block, None);
+            if matches!(result, AcceptResult::CanonExtension { .. }) {
+                guard.refresh_cached_state_root_from_tip();
+            }
+            result
         };
         assert_eq!(result, AcceptResult::CanonExtension { height });
         {
@@ -373,6 +380,57 @@ mod tests {
         .unwrap()?;
 
         Ok(())
+    }
+
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TxRecordArtifact {
+        tx_id: String,
+        submitted_at: String,
+    }
+
+    fn persist_tx_records(path: &Path, records: &[TxRecordArtifact]) -> Result<()> {
+        std::fs::write(path, serde_json::to_vec_pretty(records)?)?;
+        Ok(())
+    }
+
+    async fn wait_for_progress_aware_convergence<F, Fut>(
+        label: &str,
+        overall_timeout: Duration,
+        no_progress_timeout: Duration,
+        interval: Duration,
+        mut poll: F,
+    ) -> Result<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<(bool, u64)>>,
+    {
+        let mut overall_deadline = tokio::time::Instant::now() + overall_timeout;
+        let mut stall_deadline = tokio::time::Instant::now() + no_progress_timeout;
+        let mut last_progress = 0u64;
+        let mut saw_progress = false;
+
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= stall_deadline {
+                return Err(anyhow!("timeout waiting for {}: no progress before deadline", label));
+            }
+            if now >= overall_deadline {
+                return Err(anyhow!("timeout waiting for {}: overall deadline reached", label));
+            }
+
+            let (done, progress) = poll().await?;
+            if done {
+                return Ok(());
+            }
+            if !saw_progress || progress > last_progress {
+                saw_progress = true;
+                last_progress = progress;
+                overall_deadline = tokio::time::Instant::now() + overall_timeout;
+                stall_deadline = tokio::time::Instant::now() + no_progress_timeout;
+            }
+            tokio::time::sleep(interval).await;
+        }
     }
 
     async fn node_snapshot(node: &NodeHarness, sender: &str, recipient: &str) -> (u64, String, String, String, u128, u128, u64) {
@@ -716,6 +774,87 @@ mod tests {
 
         stop_node(restarted).await;
         stop_node(live_peer).await;
+        Ok(())
+    }
+
+    #[test]
+    fn tx_ids_remain_in_artifacts_after_later_failure() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("tx-records.json");
+        let first = TxRecordArtifact {
+            tx_id: "aa".repeat(32),
+            submitted_at: "2026-07-13T00:00:00Z".to_string(),
+        };
+        persist_tx_records(&path, &[first.clone()])?;
+
+        let simulated_late_failure = Err::<(), _>(anyhow!("later stage failed after submission was recorded"));
+        assert!(simulated_late_failure.is_err());
+
+        let persisted = std::fs::read_to_string(&path)?;
+        assert!(persisted.contains(&first.tx_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn progress_aware_convergence_extends_deadline_when_progress_continues() -> Result<()> {
+        let progress = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicU64::new(0));
+        let progress_task = progress.clone();
+        let done_task = done.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            progress_task.store(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            progress_task.store(2, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            progress_task.store(3, Ordering::SeqCst);
+            done_task.store(1, Ordering::SeqCst);
+        });
+
+        wait_for_progress_aware_convergence(
+            "progress-aware convergence",
+            Duration::from_millis(300),
+            Duration::from_millis(120),
+            Duration::from_millis(10),
+            || {
+                let progress = progress.load(Ordering::SeqCst);
+                let done = done.load(Ordering::SeqCst) != 0;
+                async move { Ok((done, progress)) }
+            },
+        )
+        .await?;
+
+        assert_eq!(done.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_progress_timeout_still_fails_a_stalled_follower() -> Result<()> {
+        let err = wait_for_progress_aware_convergence(
+            "stalled follower",
+            Duration::from_millis(120),
+            Duration::from_millis(40),
+            Duration::from_millis(5),
+            || async { Ok((false, 0)) },
+        )
+        .await
+        .expect_err("stalled follower should time out");
+
+        assert!(err.to_string().contains("no progress before deadline"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cached_state_root_height_tracks_canonical_blocks_in_status_snapshot() -> Result<()> {
+        let node = start_node(true).await?;
+        let tip = mine_and_apply_empty_block(&node.chain, 1, 0xA5, ZERO_MINER).await?;
+        let state = node.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let snapshot = state.status_snapshot().await;
+
+        assert_eq!(snapshot.cached_state_root_height, Some(1));
+        assert_eq!(snapshot.cached_state_root.as_deref(), Some(tip.header.state_root.as_str()));
+
+        stop_node(node).await;
         Ok(())
     }
 
