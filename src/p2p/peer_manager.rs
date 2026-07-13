@@ -122,15 +122,13 @@ impl PeerManager {
 
     /// Record a height received from a peer.
     ///
-    /// Skips the height write if height < existing AND we're in bulk sync
-    /// (prevents backwards height overwrite — Bug Fix 11 from vision-node).
-    pub fn note_peer_height(&self, addr: &str, height: u64, in_bulk_sync: bool) {
+    /// Heights are monotonic while a peer remains connected: lower reports are
+    /// treated as stale and only refresh activity timestamps.
+    pub fn note_peer_height(&self, addr: &str, height: u64, _in_bulk_sync: bool) {
         let mut peers = self.peers.write().unwrap();
         if let Some(peer) = peers.get_mut(addr) {
             let now = Instant::now();
-            if in_bulk_sync && height < peer.height {
-                // Delivered block heights during batch sync must not overwrite
-                // the peer's real known tip.
+            if height < peer.height {
                 peer.last_activity = Some(now);
                 peer.last_height_response_at = Some(now);
                 return;
@@ -142,7 +140,6 @@ impl PeerManager {
         }
     }
 
-    /// Record that we sent a height poll to `addr`.
     pub fn record_height_poll_sent(&self, addr: &str) {
         let mut peers = self.peers.write().unwrap();
         if let Some(peer) = peers.get_mut(addr) {
@@ -206,7 +203,7 @@ impl PeerManager {
             })
             .max_by(|a, b| {
                 a.height.cmp(&b.height)
-                    // Lower address string wins on tie — deterministic.
+                    // Lower address string wins on tie - deterministic.
                     .then_with(|| b.addr.cmp(&a.addr))
             })
             .map(|p| p.addr.clone())
@@ -219,7 +216,7 @@ impl Default for PeerManager {
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// --- Tests ---
 
 #[cfg(test)]
 mod tests {
@@ -236,7 +233,7 @@ mod tests {
         pm
     }
 
-    // ── best_remote_height ────────────────────────────────────────────────────
+    // -- best_remote_height --
 
     #[test]
     fn best_remote_height_zero_when_no_peers() {
@@ -257,7 +254,7 @@ mod tests {
         assert_eq!(pm.best_remote_height(), 0);
     }
 
-    // ── best_sync_target ──────────────────────────────────────────────────────
+    // -- best_sync_target --
 
     #[test]
     fn best_sync_target_none_when_no_peers() {
@@ -279,7 +276,7 @@ mod tests {
 
     #[test]
     fn best_sync_target_tiebreak_is_deterministic_by_addr() {
-        // Two peers at the same height — the lexicographically smaller addr wins.
+        // Two peers at the same height - the lexicographically smaller addr wins.
         let pm = pm_with(&[("zzz:9000", 100), ("aaa:9000", 100)]);
         assert_eq!(pm.best_sync_target(0).unwrap(), "aaa:9000");
     }
@@ -299,7 +296,7 @@ mod tests {
         assert!(pm.best_sync_target(100).is_none());
     }
 
-    // ── note_peer_height / in_bulk_sync guard ─────────────────────────────────
+    // -- note_peer_height / in_bulk_sync guard --
 
     #[test]
     fn note_peer_height_updates_height() {
@@ -316,12 +313,37 @@ mod tests {
         pm.upsert("a:9000", false);
         pm.set_state("a:9000", PeerState::Connected);
         pm.note_peer_height("a:9000", 100, false);
-        // Bulk sync delivers a lower height — must not overwrite.
+        // Bulk sync delivers a lower height - must not overwrite.
         pm.note_peer_height("a:9000", 50, true);
         assert_eq!(pm.best_remote_height(), 100);
     }
 
-    // ── set_state clears height on disconnect ─────────────────────────────────
+    #[test]
+    fn note_peer_height_does_not_regress_on_lower_connected_update() {
+        let pm = PeerManager::new();
+        pm.upsert("a:9000", false);
+        pm.set_state("a:9000", PeerState::Connected);
+        pm.note_peer_height("a:9000", 84, false);
+        pm.note_peer_height("a:9000", 64, false);
+        assert_eq!(pm.best_remote_height(), 84);
+        pm.note_peer_height("a:9000", 87, false);
+        assert_eq!(pm.best_remote_height(), 87);
+    }
+
+    #[test]
+    fn reconnect_clears_height_and_refreshes_after_disconnect() {
+        let pm = PeerManager::new();
+        pm.upsert("a:9000", false);
+        pm.set_state("a:9000", PeerState::Connected);
+        pm.note_peer_height("a:9000", 84, false);
+        pm.set_state("a:9000", PeerState::Disconnected);
+        assert_eq!(pm.best_remote_height(), 0);
+        pm.set_state("a:9000", PeerState::Connected);
+        pm.note_peer_height("a:9000", 64, false);
+        assert_eq!(pm.best_remote_height(), 64);
+    }
+
+    // -- set_state clears height on disconnect --
 
     #[test]
     fn disconnect_clears_height() {
@@ -331,7 +353,7 @@ mod tests {
         assert_eq!(pm.best_remote_height(), 0);
     }
 
-    // ── connected_count / outbound_count ─────────────────────────────────────
+    // -- connected_count / outbound_count --
 
     #[test]
     fn connected_count_and_outbound_count() {
