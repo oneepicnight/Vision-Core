@@ -43,6 +43,7 @@ pub fn bootstrap_chain(g: &mut ChainState, _settings: &Settings) -> Result<()> {
 pub fn initialize_chain_state(settings: &Settings) -> Result<ChainState> {
     let mut chain_state = ChainState::open_with_genesis(&settings.data_dir)?;
     bootstrap_chain(&mut chain_state, settings)?;
+    chain_state.refresh_cached_state_root_from_tip();
 
     let current_height = chain_state.current_height();
     match restore_latest_snapshot(&mut chain_state, current_height) {

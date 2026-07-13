@@ -213,6 +213,14 @@ impl ChainState {
     pub fn balance_of(&self, address: &str) -> u128 {
         self.balances.get(address).copied().unwrap_or(0)
     }
+
+    /// Refresh the cached state root from the current canonical tip.
+    pub fn refresh_cached_state_root_from_tip(&mut self) {
+        self.cached_state_root = self
+            .blocks
+            .last()
+            .map(|tip| (tip.header.number, tip.header.state_root.clone()));
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -329,4 +337,25 @@ mod tests {
         let g = temp_state();
         assert_eq!(g.nonce_of("nobody"), 0);
     }
+    #[test]
+    fn refresh_cached_state_root_from_tip_tracks_canonical_tip() {
+        use crate::config::constants::TARGET_BLOCK_TIME;
+
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+        let b1 = crate::chain::accept::tests_helpers::make_test_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
+        apply_block(&mut g, &b1, None);
+
+        g.cached_state_root = None;
+        g.refresh_cached_state_root_from_tip();
+
+        assert_eq!(g.cached_state_root, Some((1, b1.header.state_root.clone())));
+    }
+
 }

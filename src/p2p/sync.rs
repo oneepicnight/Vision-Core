@@ -148,8 +148,16 @@ async fn live_sync_from_peer(
             apply_block(&mut g, &block, Some(peer_addr))
         };
         match result {
-            AcceptResult::CanonExtension { .. } | AcceptResult::SideChain { .. } => {
+            AcceptResult::CanonExtension { .. } => {
+                {
+                    let mut g = chain.lock().await;
+                    g.refresh_cached_state_root_from_tip();
+                }
                 tracing::debug!("[SYNC] imported block height={} hash={}", block.header.number, block.hash());
+                imported += 1;
+            }
+            AcceptResult::SideChain { .. } => {
+                tracing::debug!("[SYNC] imported side-chain block height={} hash={}", block.header.number, block.hash());
                 imported += 1;
             }
             AcceptResult::StoredOrphan { block_hash } => {

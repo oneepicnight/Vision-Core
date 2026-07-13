@@ -126,6 +126,7 @@ impl MinerManager {
         let result = apply_block(g, &block, None);
         if matches!(result, AcceptResult::CanonExtension { .. }) {
             self.record_block_found();
+            g.refresh_cached_state_root_from_tip();
         }
         result
     }
@@ -376,4 +377,16 @@ mod tests {
         );
         assert_eq!(m.stats().blocks_found, 0);
     }
+    #[test]
+    fn submit_solution_refreshes_cached_state_root_on_canon_extension() {
+        let m = default_manager();
+        let mut g = seeded_state();
+        let gen = genesis_block();
+        let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
+        let blk = make_test_block(gen.hash(), 1, ts, 0xAD);
+
+        assert_eq!(m.submit_solution(&mut g, blk.clone()), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(g.cached_state_root, Some((1, blk.header.state_root.clone())));
+    }
+
 }
