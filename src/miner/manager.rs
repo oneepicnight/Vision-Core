@@ -265,6 +265,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_candidate_does_not_mutate_canonical_state() {
+        let m = default_manager();
+        let g = seeded_state();
+        let before_balances = g.balances.clone();
+        let before_nonces = g.nonces.clone();
+
+        let _job = m
+            .build_candidate_for_tip(&g, &"22".repeat(32), vec![])
+            .unwrap();
+
+        assert_eq!(g.balances, before_balances);
+        assert_eq!(g.nonces, before_nonces);
+    }
+
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     #[test]

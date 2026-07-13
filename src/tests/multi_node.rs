@@ -388,6 +388,44 @@ mod tests {
             guard.nonce_of(sender),
         )
     }
+
+    #[test]
+    fn reward_only_height_one_block_matches_independent_follower() -> Result<()> {
+        let db_miner = sled::Config::new().temporary(true).open()?;
+        let db_follower = sled::Config::new().temporary(true).open()?;
+        let mut miner = ChainState::empty(db_miner);
+        let mut follower = ChainState::empty(db_follower);
+        let genesis = crate::genesis::genesis_block();
+        apply_block(&mut miner, &genesis, None);
+        apply_block(&mut follower, &genesis, None);
+
+        let before_balances = miner.balances.clone();
+        let before_nonces = miner.nonces.clone();
+        let tip = miner.blocks.last().unwrap().clone();
+        let block = build_mined_block(
+            &tip,
+            1,
+            tip.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+            vec![],
+            &miner.balances,
+            &miner.nonces,
+            ZERO_MINER,
+        )?;
+
+        assert_eq!(miner.balances, before_balances);
+        assert_eq!(miner.nonces, before_nonces);
+
+        assert_eq!(apply_block(&mut miner, &block, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(apply_block(&mut follower, &block, None), AcceptResult::CanonExtension { height: 1 });
+
+        let miner_tip = miner.blocks.last().unwrap();
+        let follower_tip = follower.blocks.last().unwrap();
+        assert_eq!(miner_tip.header.state_root, follower_tip.header.state_root);
+        assert_eq!(miner.balance_of(ZERO_MINER), crate::miner::job::block_reward(1));
+        assert_eq!(follower.balance_of(ZERO_MINER), crate::miner::job::block_reward(1));
+        Ok(())
+    }
     #[tokio::test]
     async fn two_node_local_testnet_catches_up_over_tcp() -> Result<()> {
         let miner = start_node(true).await?;

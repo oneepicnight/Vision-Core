@@ -5,9 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use tokio::sync::Mutex;
 
-use crate::chain::accept::{apply_coinbase_reward, AcceptResult};
-use crate::chain::state_root::compute_state_root;
-use crate::chain::ChainState;
+use crate::chain::{AcceptResult, ChainState};
 use crate::config::constants::{BLOCK_TARGET_TXS, MIN_PEERS_FOR_MINING};
 use crate::config::settings::Settings;
 use crate::mempool::Mempool;
@@ -17,7 +15,7 @@ use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
 use crate::p2p::sync::SyncGuard;
 use crate::p2p::protocol::{validate_handshake, HandshakeMessage, HandshakeResult};
-use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionState};
+use crate::types::transaction::canonical_tx_id;
 
 /// Spawn all background services for a running node.
 ///
@@ -89,26 +87,7 @@ pub async fn start_services(
                     let maybe_job = {
                         let chain_guard = chain_ref.lock().await;
                         let txs = mempool_ref.select_for_block(BLOCK_TARGET_TXS);
-                        (|| -> Option<crate::miner::job::MiningJob> {
-                            let mut job = miner_manager
-                                .build_candidate_for_tip(&chain_guard, &miner_addr, txs)?;
-                            let mut exec_state = TxExecutionState::from_balances_and_nonces(
-                                chain_guard.balances.clone(),
-                                chain_guard.nonces.clone(),
-                            );
-                            for tx in job.txs.iter().skip(1) {
-                                simulate_tx_execution(&mut exec_state, tx).ok()?;
-                            }
-                            apply_coinbase_reward(
-                                &mut exec_state,
-                                &job.header_template.miner,
-                                job.header_template.number,
-                            )
-                            .ok()?;
-                            let state_root = compute_state_root(&exec_state.balances, &exec_state.nonces).ok()?;
-                            job.header_template.state_root = state_root;
-                            Some(job)
-                        })()
+                        miner_manager.build_candidate_for_tip(&chain_guard, &miner_addr, txs)
                     };
 
                     let Some(job) = maybe_job else {
@@ -135,7 +114,6 @@ pub async fn start_services(
                     let Some(block) = mined else {
                         continue;
                     };
-
                     let confirmed_tx_ids: Vec<String> = block.txs.iter().map(canonical_tx_id).collect();
                     let mut chain_guard = chain_ref.lock().await;
                     match miner_manager.submit_solution(&mut chain_guard, block) {
@@ -339,12 +317,14 @@ async fn poll_peer_height(
     peer_manager: &Arc<PeerManager>,
 ) -> Result<u64> {
     send_message(stream, &P2PMessage::GetHeight).await?;
-    let (remote_height, remote_tip_hash) = match recv_message(stream).await? {
-        P2PMessage::Height { height, tip_hash } => (height, tip_hash),
-        P2PMessage::Disconnect { reason } => {
+    let (remote_height, remote_tip_hash) = match tokio::time::timeout(Duration::from_secs(5), recv_message(stream)).await {
+        Ok(Ok(P2PMessage::Height { height, tip_hash })) => (height, tip_hash),
+        Ok(Ok(P2PMessage::Disconnect { reason })) => {
             return Err(anyhow::anyhow!("peer rejected height query: {}", reason))
         }
-        other => return Err(anyhow::anyhow!("unexpected height reply: {}", other.label())),
+        Ok(Ok(other)) => return Err(anyhow::anyhow!("unexpected height reply: {}", other.label())),
+        Ok(Err(e)) => return Err(anyhow::anyhow!("height poll read error: {}", e)),
+        Err(_) => return Err(anyhow::anyhow!("height poll timeout for {}", peer_addr)),
     };
     peer_manager.note_peer_height(peer_addr, remote_height, false);
     let local_height = chain.lock().await.current_height();
@@ -412,5 +392,20 @@ mod tests {
         assert_eq!(pm.best_remote_height(), 42);
         handle.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn poll_peer_height_times_out_when_peer_stalls() {
+        let chain = temp_chain();
+        let pm = temp_peer_manager();
+        let peer_addr = "127.0.0.1:19110";
+        pm.upsert(peer_addr, true);
+        pm.set_state(peer_addr, PeerState::Connected);
+        let (mut client, _server) = duplex(4096);
+        let result = poll_peer_height(&mut client, peer_addr, &chain, &pm).await;
+        assert!(result.is_err());
+        assert_eq!(pm.best_remote_height(), 0);
+    }
+
 }
+
 
