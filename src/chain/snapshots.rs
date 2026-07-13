@@ -144,6 +144,11 @@ pub fn restore_latest_snapshot(g: &mut ChainState, max_height: u64) -> Result<u6
         g.cumulative_work.insert(b.hash().to_string(), cw);
     }
 
+    g.seen_blocks.clear();
+    for b in &g.blocks {
+        g.seen_blocks.insert(b.hash().to_string());
+    }
+
     g.cached_state_root = Some((best, computed_state_root));
 
     tracing::info!("[SNAPSHOT] Restored state to height {}", best);
@@ -367,6 +372,41 @@ mod tests {
     }
 
     #[test]
+    fn restore_rebuilds_seen_blocks_so_replayed_tail_is_not_duplicate() {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+        let mut blocks = vec![gen.clone()];
+        let mut prev = gen.hash().to_string();
+        let mut ts = gen.header.timestamp;
+
+        for i in 1..=4 {
+            ts += TARGET_BLOCK_TIME;
+            let blk = make_test_block(&prev, i, ts, (0xA0 + i) as u8);
+            apply_block(&mut g, &blk, None);
+            prev = blk.hash().to_string();
+            blocks.push(blk);
+            if i == 2 {
+                save_snapshot(&g, 2).unwrap();
+            }
+        }
+
+        let restored = restore_latest_snapshot(&mut g, 4).unwrap();
+        assert_eq!(restored, 2);
+        assert!(!g.seen_blocks.contains(blocks[3].hash()));
+        assert!(!g.seen_blocks.contains(blocks[4].hash()));
+
+        assert_eq!(
+            apply_block(&mut g, &blocks[3], None),
+            crate::chain::accept::AcceptResult::CanonExtension { height: 3 }
+        );
+        assert_eq!(
+            apply_block(&mut g, &blocks[4], None),
+            crate::chain::accept::AcceptResult::CanonExtension { height: 4 }
+        );
+    }
+
+    #[test]
     fn restore_rebuilds_cumulative_work() {
         let (mut g, blocks) = build_chain_n(3);
         save_snapshot(&g, 2).unwrap();
@@ -393,3 +433,4 @@ mod tests {
         assert_eq!(count_before, count_after, "should not save at non-multiple height");
     }
 }
+
