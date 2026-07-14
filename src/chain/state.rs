@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use sled::Db;
+use crate::chain::storage::load_meta;
 use crate::types::{Block, Tx};
 use crate::config::constants::*;
 
@@ -106,9 +107,13 @@ impl ChainState {
     pub fn open_with_genesis(data_dir: &str) -> anyhow::Result<Self> {
         let db = sled::open(format!("{}/chain.db", data_dir))?;
         let mut state = Self::empty(db);
+        let has_persisted_tip = load_meta(&state, "tip_height")?.is_some();
 
         // Try to recover the canonical chain from persistent storage.
         if let Err(e) = crate::chain::storage::load_canon_chain(&mut state) {
+            if has_persisted_tip {
+                return Err(e);
+            }
             tracing::warn!("[STATE] Could not reload chain from DB: {}", e);
             // Non-fatal: node will re-sync from peers.
         }
