@@ -66,7 +66,7 @@ impl Default for SyncGuard {
     fn default() -> Self { Self::new() }
 }
 
-async fn live_sync_from_peer(
+pub(crate) async fn live_sync_from_peer(
     conn_mgr: &P2PConnectionManager,
     chain: &Arc<Mutex<ChainState>>,
     peer_manager: &PeerManager,
@@ -313,6 +313,50 @@ mod tests {
 
     async fn spawn_mock_peer(blocks: Vec<Block>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         spawn_scripted_peer(blocks, vec![]).await
+    }
+
+    async fn spawn_recording_peer(
+        blocks: Vec<Block>,
+        requests: Arc<Mutex<Vec<String>>>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let server_nonce = 0xDEADBEEF_u64;
+            let client_hs = match recv_message(&mut stream).await.unwrap() {
+                P2PMessage::Handshake(hs) => hs,
+                other => panic!("expected handshake, got {:?}", other),
+            };
+            assert_eq!(validate_handshake(&client_hs, server_nonce), HandshakeResult::Accepted);
+            let tip_height = blocks.last().map(|b| b.header.number).unwrap_or(0);
+            let tip_hash = blocks.last().map(|b| b.hash().to_string());
+            send_message(&mut stream, &P2PMessage::Handshake(HandshakeMessage::new(tip_height, server_nonce))).await.unwrap();
+
+            let mut by_hash = HashMap::new();
+            for block in blocks {
+                by_hash.insert(block.hash().to_string(), block);
+            }
+
+            loop {
+                match recv_message(&mut stream).await {
+                    Ok(P2PMessage::GetHeight) => {
+                        send_message(&mut stream, &P2PMessage::Height { height: tip_height, tip_hash: tip_hash.clone() }).await.unwrap();
+                    }
+                    Ok(P2PMessage::GetBlock { hash }) => {
+                        requests.lock().await.push(hash.clone());
+                        if let Some(block) = by_hash.get(&hash).cloned() {
+                            send_message(&mut stream, &P2PMessage::Block { block }).await.unwrap();
+                        } else {
+                            break;
+                        }
+                    }
+                    Ok(P2PMessage::Disconnect { .. }) | Err(_) => break,
+                    Ok(other) => panic!("unexpected message {:?}", other),
+                }
+            }
+        });
+        (addr, handle)
     }
 
     fn seeded_chain(blocks: &[Block]) -> ChainState {
@@ -620,9 +664,56 @@ mod tests {
         malicious_task.await.unwrap();
         valid_task.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn live_sync_from_peer_catches_up_small_gap_after_restart_recovery() {
+        let remote_blocks = build_blocks(84, None);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (peer_addr, peer_task) = spawn_recording_peer(remote_blocks.clone(), requests.clone()).await;
+
+        let mut local_chain = temp_state();
+        let gen = genesis_block();
+        assert!(matches!(apply_block(&mut local_chain, &gen, None), AcceptResult::CanonExtension { height: 0 }));
+        for block in remote_blocks.iter().take(81) {
+            assert!(matches!(apply_block(&mut local_chain, block, None), AcceptResult::CanonExtension { .. }));
+        }
+
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 84, false);
+
+        let conn_mgr = P2PConnectionManager::new("127.0.0.1:19110".parse().unwrap(), chain.clone(), pm.clone());
+        let imported = timeout(
+            Duration::from_secs(10),
+            live_sync_from_peer(&conn_mgr, &chain, pm.as_ref(), &peer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(imported, 3);
+
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 84);
+        assert_eq!(g.tip_hash(), remote_blocks.last().unwrap().hash());
+        drop(g);
+
+        let requested = requests.lock().await.clone();
+        let requested_heights: Vec<u64> = requested
+            .iter()
+            .map(|hash| {
+                remote_blocks
+                    .iter()
+                    .find(|block| block.hash() == *hash)
+                    .map(|block| block.header.number)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(requested_heights, vec![84, 83, 82]);
+
+        peer_task.await.unwrap();
+    }
 }
-
-
-
-
-

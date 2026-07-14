@@ -256,16 +256,22 @@ async fn seed_peer_loop(
                             remote_height,
                             lag
                         );
-                        if let Err(e) = crate::p2p::sync::watchdog_step(
-                            &conn_mgr,
-                            &chain,
-                            &peer_manager,
-                            &mut sync_guard,
-                        )
-                        .await
-                        {
-                            tracing::warn!("[SYNC] catch-up trigger error for {}: {}", peer_addr, e);
-                            break;
+                        if sync_guard.is_blocked() {
+                            tracing::trace!("[SYNC] {} catch-up skipped (sync in progress or throttled)", peer_addr);
+                        } else {
+                            sync_guard.mark_started();
+                            let result = crate::p2p::sync::live_sync_from_peer(
+                                &conn_mgr,
+                                &chain,
+                                &peer_manager,
+                                &peer_addr,
+                            )
+                            .await;
+                            sync_guard.mark_done();
+                            if let Err(e) = result {
+                                tracing::warn!("[SYNC] catch-up trigger error for {}: {}", peer_addr, e);
+                                break;
+                            }
                         }
                     }
 
