@@ -45,8 +45,9 @@ pub async fn start_services(
             let chain_ref = chain.clone();
             let peer_manager_ref = peer_manager.clone();
             let conn_mgr_ref = conn_mgr.clone();
+            let mempool_ref = mempool.clone();
             tokio::spawn(async move {
-                seed_peer_loop(chain_ref, peer_manager_ref, conn_mgr_ref, seed_peer).await;
+                seed_peer_loop(chain_ref, peer_manager_ref, conn_mgr_ref, mempool_ref, seed_peer).await;
             });
         }
     }
@@ -55,12 +56,13 @@ pub async fn start_services(
         let mgr = conn_mgr.clone();
         let pm = peer_manager.clone();
         let chain_ref = chain.clone();
+        let mempool_ref = mempool.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(20));
             let mut sync_guard = crate::p2p::sync::SyncGuard::new();
             loop {
                 interval.tick().await;
-                if let Err(e) = crate::p2p::sync::watchdog_step(&mgr, &chain_ref, &pm, &mut sync_guard).await {
+                if let Err(e) = crate::p2p::sync::watchdog_step(&mgr, &chain_ref, &pm, &mut sync_guard, Some(mempool_ref.as_ref())).await {
                     tracing::warn!("[SYNC] Watchdog error: {}", e);
                 }
             }
@@ -119,6 +121,14 @@ pub async fn start_services(
                     match miner_manager.submit_solution(&mut chain_guard, block) {
                         AcceptResult::CanonExtension { .. } => {
                             mempool_ref.remove_confirmed(&confirmed_tx_ids);
+                            if let Some(recovery) = chain_guard.pending_reorg_recovery.take() {
+                                let report = mempool_ref.requeue_after_reorg(&chain_guard, recovery);
+                                tracing::info!(
+                                    "[MEMPOOL] reorg recovery accepted={} rejected={}",
+                                    report.accepted.len(),
+                                    report.rejected.len()
+                                );
+                            }
                             tracing::info!(
                                 "[MINER] accepted mined block and cleared {} txs",
                                 confirmed_tx_ids.len()
@@ -149,6 +159,7 @@ async fn seed_peer_loop(
     chain: Arc<Mutex<ChainState>>,
     peer_manager: Arc<PeerManager>,
     conn_mgr: Arc<P2PConnectionManager>,
+    mempool: Arc<Mempool>,
     peer_addr: String,
 ) {
     let reconnect_delay = Duration::from_secs(2);
@@ -265,6 +276,7 @@ async fn seed_peer_loop(
                                 &chain,
                                 &peer_manager,
                                 &peer_addr,
+                                Some(mempool.as_ref()),
                             )
                             .await;
                             sync_guard.mark_done();

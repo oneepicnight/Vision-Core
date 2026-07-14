@@ -12,6 +12,7 @@ use crate::chain::accept::{apply_block, AcceptResult};
 use crate::chain::state::ChainState;
 use crate::config::constants::{STALL_OVERRIDE_SECS, SYNC_CLEAR_JOB_MIN_LAG, SYNC_LAG_THRESHOLD, TARGET_BLOCK_TIME};
 use crate::genesis::genesis_block;
+use crate::mempool::Mempool;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::PeerManager;
@@ -71,6 +72,7 @@ pub(crate) async fn live_sync_from_peer(
     chain: &Arc<Mutex<ChainState>>,
     peer_manager: &PeerManager,
     peer_addr: &str,
+    mempool: Option<&Mempool>,
 ) -> Result<usize> {
     let peer_socket: SocketAddr = peer_addr.parse()?;
     let mut stream = P2PConnectionManager::connect(peer_socket).await?;
@@ -152,6 +154,14 @@ pub(crate) async fn live_sync_from_peer(
                 {
                     let mut g = chain.lock().await;
                     g.refresh_cached_state_root_from_tip();
+                    if let (Some(mempool), Some(recovery)) = (mempool, g.pending_reorg_recovery.take()) {
+                        let report = mempool.requeue_after_reorg(&g, recovery);
+                        tracing::info!(
+                            "[MEMPOOL] reorg recovery accepted={} rejected={}",
+                            report.accepted.len(),
+                            report.rejected.len()
+                        );
+                    }
                 }
                 tracing::debug!("[SYNC] imported block height={} hash={}", block.header.number, block.hash());
                 imported += 1;
@@ -178,6 +188,7 @@ pub async fn watchdog_step(
     chain: &Arc<Mutex<ChainState>>,
     peer_manager: &PeerManager,
     guard: &mut SyncGuard,
+    mempool: Option<&Mempool>,
 ) -> Result<()> {
     if guard.is_blocked() {
         tracing::trace!("[SYNC] watchdog skipped (sync in progress or throttled)");
@@ -197,7 +208,7 @@ pub async fn watchdog_step(
                 tracing::info!("[SYNC] clearing miner job (lag={})", lag);
             }
             guard.mark_started();
-            let result = live_sync_from_peer(conn_mgr, chain, peer_manager, &peer_addr).await;
+            let result = live_sync_from_peer(conn_mgr, chain, peer_manager, &peer_addr, mempool).await;
             guard.mark_done();
             result?;
         }
@@ -421,7 +432,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19101".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap().unwrap();
+        timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap().unwrap();
 
         let g = chain.lock().await;
         assert_eq!(g.current_height(), 6);
@@ -447,7 +458,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19102".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -474,7 +485,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19103".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -500,7 +511,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19104".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -527,7 +538,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19105".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -553,7 +564,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19106".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -584,7 +595,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19107".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -610,7 +621,7 @@ mod tests {
 
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19108".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
-        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let result = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(result.is_err());
 
         let g = chain.lock().await;
@@ -646,14 +657,14 @@ mod tests {
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19109".parse().unwrap(), chain.clone(), pm.clone());
         let mut guard = SyncGuard::new();
 
-        let first = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let first = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(first.is_err());
 
         guard.reset();
         pm.set_state(&malicious_peer, PeerState::Disconnected);
         pm.note_peer_height(&valid_peer, 6, false);
 
-        let second = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard)).await.unwrap();
+        let second = timeout(Duration::from_secs(5), watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)).await.unwrap();
         assert!(second.is_ok());
 
         let g = chain.lock().await;
@@ -688,7 +699,7 @@ mod tests {
         let conn_mgr = P2PConnectionManager::new("127.0.0.1:19110".parse().unwrap(), chain.clone(), pm.clone());
         let imported = timeout(
             Duration::from_secs(10),
-            live_sync_from_peer(&conn_mgr, &chain, pm.as_ref(), &peer),
+            live_sync_from_peer(&conn_mgr, &chain, pm.as_ref(), &peer, None),
         )
         .await
         .unwrap()

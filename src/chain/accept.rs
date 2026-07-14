@@ -206,6 +206,7 @@ fn collect_ancestor_window(g: &ChainState, tip_hash: &str) -> Vec<Block> {
 /// Caller must have completed all validation stages before calling this.
 fn push_canonical(g: &mut ChainState, blk: Block, cw: u128) {
     let hash = blk.hash().to_string();
+    g.pending_reorg_recovery = None;
     let height = blk.header.number;
     g.cumulative_work.insert(hash.clone(), cw);
     g.seen_blocks.insert(hash.clone());
@@ -542,14 +543,18 @@ pub fn apply_block(
 
     // Attempt a reorg only when this chain has *strictly* more work.
     // Equal-work reorgs are skipped (first-seen wins, reduces state churn).
-    if candidate_cw > tip_cw && crate::chain::reorg::try_reorg(g, blk) {
-        tracing::info!(
+    if candidate_cw > tip_cw {
+        let reorg_recovery = crate::chain::reorg::try_reorg(g, blk);
+        if let Some(recovery) = reorg_recovery {
+            g.pending_reorg_recovery = Some(recovery);
+            tracing::info!(
             "[REORG] new tip h={} hash={:.8} cw={}",
             blk.header.number, hash, candidate_cw
         );
-        let height = blk.height();
-        crate::chain::orphan::process_orphans(g, &hash);
-        return AcceptResult::CanonExtension { height };
+            let height = blk.height();
+            crate::chain::orphan::process_orphans(g, &hash);
+            return AcceptResult::CanonExtension { height };
+        }
     }
 
     let height = blk.height();

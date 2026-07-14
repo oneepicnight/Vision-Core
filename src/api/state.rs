@@ -212,20 +212,33 @@ impl NodeApiState {
     }
 
     pub(crate) async fn transaction_snapshot(&self, tx_id: &str) -> TransactionLookupSnapshot {
-        let chain = self.chain.lock().await;
-        for (block_height, block) in chain.blocks.iter().enumerate() {
-            for (tx_index, tx) in block.txs.iter().enumerate() {
-                if canonical_tx_id(tx) == tx_id {
-                    return TransactionLookupSnapshot {
-                        tx_id: tx_id.to_string(),
-                        found: true,
-                        block_hash: Some(block.hash().to_string()),
-                        block_height: Some(block_height as u64),
-                        tx_index: Some(tx_index),
-                        tx: Some(tx.clone()),
-                    };
+        {
+            let chain = self.chain.lock().await;
+            for (block_height, block) in chain.blocks.iter().enumerate() {
+                for (tx_index, tx) in block.txs.iter().enumerate() {
+                    if canonical_tx_id(tx) == tx_id {
+                        return TransactionLookupSnapshot {
+                            tx_id: tx_id.to_string(),
+                            found: true,
+                            block_hash: Some(block.hash().to_string()),
+                            block_height: Some(block_height as u64),
+                            tx_index: Some(tx_index),
+                            tx: Some(tx.clone()),
+                        };
+                    }
                 }
             }
+        }
+
+        if let Some(tx) = self.mempool.get(tx_id) {
+            return TransactionLookupSnapshot {
+                tx_id: tx_id.to_string(),
+                found: true,
+                block_hash: None,
+                block_height: None,
+                tx_index: None,
+                tx: Some(tx),
+            };
         }
 
         TransactionLookupSnapshot {
@@ -411,6 +424,25 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn transaction_snapshot_returns_pending_mempool_tx() {
+        let chain = Arc::new(Mutex::new(temp_state()));
+        let mempool = Arc::new(Mempool::new());
+        let tx = placeholder_tx(9);
+        let tx_id = canonical_tx_id(&tx);
+        assert!(mempool.insert(tx.clone()));
+
+        let state = NodeApiState::new(chain, mempool);
+        let snapshot = state.transaction_snapshot(&tx_id).await;
+
+        assert!(snapshot.found);
+        assert_eq!(snapshot.tx_id, tx_id);
+        assert_eq!(snapshot.block_hash, None);
+        assert_eq!(snapshot.block_height, None);
+        assert_eq!(snapshot.tx_index, None);
+        assert_eq!(snapshot.tx, Some(tx));
     }
 
     #[test]

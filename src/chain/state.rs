@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use sled::Db;
 use crate::chain::storage::load_meta;
 use crate::types::{Block, Tx};
+use crate::chain::reorg::ReorgRecovery;
 use crate::config::constants::*;
 
 /// Address type alias for clarity.
@@ -81,6 +82,10 @@ pub struct ChainState {
     /// `apply_block` does not have to recompute it on every call.
     pub cached_state_root: Option<(u64, String)>,
 
+    /// Reorg transaction recovery data produced by the last accepted reorg.
+    /// Runtime mempool policy consumes this immediately after block acceptance.
+    pub pending_reorg_recovery: Option<ReorgRecovery>,
+
     // ─── Persistent storage ───────────────────────────────────────────────────
 
     /// Sled database handle for block and state persistence.
@@ -140,6 +145,7 @@ impl ChainState {
             orphan_by_hash:    BTreeMap::new(),
             canon_index:       HashMap::new(),
             cached_state_root: None,
+            pending_reorg_recovery: None,
             db,
         }
     }

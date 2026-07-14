@@ -1,9 +1,17 @@
+use std::collections::BTreeSet;
+
 use crate::chain::accept::apply_coinbase_reward;
 use crate::chain::ChainState;
 use crate::config::constants::MAX_REORG;
-use crate::types::Block;
+use crate::types::{Block, Tx};
 use crate::chain::state_root::compute_state_root;
 use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionError, TxExecutionState};
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReorgRecovery {
+    pub displaced_txs: Vec<Tx>,
+    pub winning_tx_ids: Vec<String>,
+}
 
 // --- Chain-select helpers ---
 
@@ -139,14 +147,14 @@ fn reconstruct_branch_state(
 
     Ok(state)
 }
-pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
+pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> Option<ReorgRecovery> {
     let new_tip_hash = new_tip.hash();
 
     // --- 1. Trace the new chain segment back to a canonical ancestor ---
     let new_segment = collect_new_segment(g, new_tip_hash);
     if new_segment.is_empty() {
         tracing::debug!("[REORG] aborted: cannot trace ancestry of {:.8}", new_tip_hash);
-        return false;
+        return None;
     }
 
     // --- 2. Locate the common ancestor ---
@@ -155,7 +163,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         Some(h) => h,
         None => {
             tracing::debug!("[REORG] aborted: common ancestor {:.8} not canonical", common_hash);
-            return false;
+            return None;
         }
     };
 
@@ -166,14 +174,14 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
             "[REORG] rejected: depth {} exceeds MAX_REORG {}",
             reorg_depth, MAX_REORG
         );
-        return false;
+        return None;
     }
 
     let ancestor_state = match reconstruct_canonical_state_at_height(g, common_height) {
         Ok(state) => state,
         Err(reason) => {
             tracing::debug!("[REORG] aborted: ancestor replay validation failed: {:?}", reason);
-            return false;
+            return None;
         }
     };
 
@@ -181,7 +189,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         Ok(state) => state,
         Err(reason) => {
             tracing::debug!("[REORG] aborted: branch replay validation failed: {:?}", reason);
-            return false;
+            return None;
         }
     };
 
@@ -189,7 +197,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         Ok(root) => root,
         Err(_) => {
             tracing::debug!("[REORG] aborted: replay state root construction failed");
-            return false;
+            return None;
         }
     };
 
@@ -198,8 +206,21 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
             "[REORG] aborted: replay state root mismatch for {:.8}",
             new_tip_hash
         );
-        return false;
+        return None;
     }
+
+    let winning_tx_ids: BTreeSet<String> = new_segment
+        .iter()
+        .flat_map(|block| block.txs.iter().skip(1).map(canonical_tx_id))
+        .collect();
+    let displaced_txs: Vec<Tx> = g
+        .blocks
+        .iter()
+        .skip(common_height as usize + 1)
+        .flat_map(|block| block.txs.iter().skip(1))
+        .filter(|tx| !winning_tx_ids.contains(&canonical_tx_id(tx)))
+        .cloned()
+        .collect();
 
     let mut new_blocks = g.blocks[..=common_height as usize].to_vec();
     let mut new_canon_index = g.canon_index.clone();
@@ -235,8 +256,13 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         old_tip_height,
     ) {
         tracing::error!("[REORG] aborted: canonical persistence failed: {}", err);
-        return false;
+        return None;
     }
+
+    let recovery = ReorgRecovery {
+        displaced_txs,
+        winning_tx_ids: winning_tx_ids.into_iter().collect(),
+    };
 
     g.blocks = new_blocks;
     g.canon_index = new_canon_index;
@@ -253,7 +279,7 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         new_tip.header.number,
         reorg_depth,
     );
-    true
+    Some(recovery)
 }
 /// Compute the cumulative PoW work on the canonical chain ending at `block_hash`.
 ///
@@ -878,7 +904,7 @@ mod tests {
         // try_reorg should switch to b2p chain since b2p_cw > canon_cw.
         if b2p_cw > canon_cw {
             let reorged = try_reorg(&mut g, &b2p);
-            assert!(reorged, "reorg should succeed to heavier chain");
+            assert!(reorged.is_some(), "reorg should succeed to heavier chain");
             assert_eq!(g.tip_hash(), b2p.hash(), "tip should be b2p");
             assert_eq!(g.current_height(), 2);
             assert_eq!(
@@ -916,7 +942,7 @@ mod tests {
         g.seen_blocks.insert(fork_tip.hash().to_string());
 
         let reorged = try_reorg(&mut g, &fork_tip);
-        assert!(!reorged, "reorg deeper than MAX_REORG must be rejected");
+        assert!(reorged.is_none(), "reorg deeper than MAX_REORG must be rejected");
     }
 
     #[test]
@@ -930,7 +956,7 @@ mod tests {
         g.side_blocks.insert(orphan.hash().to_string(), orphan.clone());
 
         let result = try_reorg(&mut g, &orphan);
-        assert!(!result, "reorg with broken ancestry must fail");
+        assert!(result.is_none(), "reorg with broken ancestry must fail");
     }
 
     #[test]
@@ -974,7 +1000,7 @@ mod tests {
         g.side_blocks.insert(side2.hash().to_string(), side2.clone());
 
         let reorged = try_reorg(&mut g, &side2);
-        assert!(!reorged, "reorg must reject invalid replay transaction");
+        assert!(reorged.is_none(), "reorg must reject invalid replay transaction");
         assert_eq!(g.tip_hash(), before_tip);
         assert_eq!(canonical_block_hashes(&g), before_blocks);
         assert_eq!(g.canon_index, before_canon_index);
@@ -1017,7 +1043,7 @@ mod tests {
         g.side_blocks.insert(side2.hash().to_string(), side2.clone());
 
         let reorged = try_reorg(&mut g, &side2);
-        assert!(!reorged, "reorg must reject invalid replay state root");
+        assert!(reorged.is_none(), "reorg must reject invalid replay state root");
         assert_eq!(g.tip_hash(), before_tip);
         assert_eq!(canonical_block_hashes(&g), before_blocks);
         assert_eq!(g.canon_index, before_canon_index);
@@ -1057,7 +1083,7 @@ mod tests {
 
         }
         let reorged = try_reorg(&mut g, &c3);
-        assert!(reorged, "should reorg to longer chain");
+        assert!(reorged.is_some(), "should reorg to longer chain");
         assert_eq!(g.tip_hash(), c3.hash());
         assert_eq!(
             canonical_block_hashes(&g),

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::admission::{AdmissionDecision, MempoolAdmission, MempoolAdmissionError};
+use crate::chain::reorg::ReorgRecovery;
+use crate::chain::ChainState;
 use crate::config::constants::MEMPOOL_MAX;
 use crate::types::transaction::canonical_tx_id;
 use crate::types::Tx;
@@ -44,6 +46,12 @@ impl Pool {
 /// When the pool is full, the oldest transaction is evicted to make room.
 pub struct Mempool {
     inner: std::sync::Arc<std::sync::Mutex<Pool>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReorgRequeueReport {
+    pub accepted: Vec<String>,
+    pub rejected: Vec<(String, MempoolAdmissionError)>,
 }
 
 impl Default for Mempool {
@@ -147,6 +155,46 @@ impl Mempool {
         let keep: HashSet<String> = p.by_id.keys().cloned().collect();
         p.order.retain(|id| keep.contains(id));
     }
+
+    /// Re-admit eligible non-coinbase transactions displaced by a successful reorg.
+    pub fn requeue_after_reorg(
+        &self,
+        chain: &ChainState,
+        recovery: ReorgRecovery,
+    ) -> ReorgRequeueReport {
+        let winning: HashSet<String> = recovery.winning_tx_ids.iter().cloned().collect();
+        self.remove_confirmed(&recovery.winning_tx_ids);
+
+        let mut candidates: Vec<Tx> = recovery
+            .displaced_txs
+            .into_iter()
+            .filter(|tx| tx.module != "coinbase")
+            .filter(|tx| !winning.contains(&canonical_tx_id(tx)))
+            .collect();
+        candidates.sort_by(|a, b| {
+            a.sender_pubkey
+                .cmp(&b.sender_pubkey)
+                .then(a.nonce.cmp(&b.nonce))
+        });
+
+        let mut report = ReorgRequeueReport::default();
+        for tx in candidates {
+            let tx_id = canonical_tx_id(&tx);
+            let current_nonce = chain.nonce_of(&tx.sender_pubkey);
+            match self.admit(tx, current_nonce) {
+                Ok(_) => report.accepted.push(tx_id),
+                Err(err) => {
+                    tracing::debug!(
+                        "[MEMPOOL] displaced tx {} not requeued after reorg: {:?}",
+                        tx_id,
+                        err
+                    );
+                    report.rejected.push((tx_id, err));
+                }
+            }
+        }
+        report
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +253,138 @@ mod tests {
             },
             seed,
         )
+    }
+
+    fn temp_chain_with_nonce(sender: &str, nonce: u64) -> ChainState {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        let mut chain = ChainState::empty(db);
+        if nonce > 0 {
+            chain.nonces.insert(sender.to_string(), nonce);
+        }
+        chain
+    }
+
+    fn reorg_recovery(displaced_txs: Vec<Tx>, winning_tx_ids: Vec<String>) -> ReorgRecovery {
+        ReorgRecovery {
+            displaced_txs,
+            winning_tx_ids,
+        }
+    }
+
+    #[test]
+    fn displaced_valid_transaction_returns_to_mempool() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        let tx_id = canonical_tx_id(&tx);
+        let chain = temp_chain_with_nonce(&tx.sender_pubkey, 0);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![tx], vec![]));
+
+        assert_eq!(report.accepted, vec![tx_id.clone()]);
+        assert!(report.rejected.is_empty());
+        assert!(mp.has(&tx_id));
+    }
+
+    #[test]
+    fn transaction_on_winning_branch_is_not_requeued() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        let tx_id = canonical_tx_id(&tx);
+        let chain = temp_chain_with_nonce(&tx.sender_pubkey, 0);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![tx], vec![tx_id]));
+
+        assert!(report.accepted.is_empty());
+        assert!(report.rejected.is_empty());
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn stale_displaced_transaction_is_rejected() {
+        let mp = Mempool::new();
+        let tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        let chain = temp_chain_with_nonce(&tx.sender_pubkey, 2);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![tx], vec![]));
+
+        assert!(report.accepted.is_empty());
+        assert!(matches!(
+            report.rejected[0].1,
+            MempoolAdmissionError::StaleNonce { current_nonce: 2, tx_nonce: 0 }
+        ));
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn invalid_signature_displaced_transaction_is_rejected() {
+        let mp = Mempool::new();
+        let mut tx = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        tx.sig = "00".repeat(64);
+        let chain = temp_chain_with_nonce(&tx.sender_pubkey, 0);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![tx], vec![]));
+
+        assert!(report.accepted.is_empty());
+        assert!(matches!(
+            report.rejected[0].1,
+            MempoolAdmissionError::StatelessValidation(_)
+        ));
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn multiple_displaced_transactions_preserve_nonce_order() {
+        let mp = Mempool::new();
+        let tx0 = signed_transfer_tx(1, 0, 2, 1_000, 1);
+        let tx1 = signed_transfer_tx(1, 1, 2, 1_000, 1);
+        let id0 = canonical_tx_id(&tx0);
+        let id1 = canonical_tx_id(&tx1);
+        let chain = temp_chain_with_nonce(&tx0.sender_pubkey, 0);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![tx1, tx0], vec![]));
+
+        assert_eq!(report.accepted, vec![id0.clone(), id1.clone()]);
+        assert_eq!(mp.list_ids(), vec![id0, id1]);
+    }
+
+    #[test]
+    fn coinbase_transactions_are_never_requeued() {
+        let mp = Mempool::new();
+        let coinbase = Tx {
+            nonce: 0,
+            sender_pubkey: String::new(),
+            module: "coinbase".to_string(),
+            method: "reward".to_string(),
+            args: 1u64.to_be_bytes().to_vec(),
+            tip: 0,
+            fee_limit: 0,
+            sig: String::new(),
+        };
+        let chain = temp_chain_with_nonce("", 0);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![coinbase], vec![]));
+
+        assert!(report.accepted.is_empty());
+        assert!(report.rejected.is_empty());
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn conflicting_sender_nonce_policy_remains_enforced_during_requeue() {
+        let mp = Mempool::new();
+        let existing = signed_transfer_tx(1, 0, 5, 1_000, 1);
+        let displaced = signed_transfer_tx(1, 0, 2, 1_000, 2);
+        assert!(mp.insert(existing));
+        let chain = temp_chain_with_nonce(&displaced.sender_pubkey, 0);
+
+        let report = mp.requeue_after_reorg(&chain, reorg_recovery(vec![displaced], vec![]));
+
+        assert!(report.accepted.is_empty());
+        assert!(matches!(
+            report.rejected[0].1,
+            MempoolAdmissionError::DuplicateSenderNonce { .. }
+        ));
+        assert_eq!(mp.len(), 1);
     }
 
     #[test]
