@@ -352,9 +352,10 @@ pub fn apply_block(
             return AcceptResult::Rejected("genesis already applied".into());
         }
         let cw = blk.header.difficulty as u128;
+        if let Err(err) = crate::chain::storage::persist_canonical_extension(g, blk) {
+            return AcceptResult::Rejected(format!("canonical persistence failed: {}", err));
+        }
         push_canonical(g, blk.clone(), cw);
-        let _ = crate::chain::storage::store_block(g, blk);
-        let _ = crate::chain::storage::persist_tip(g);
         return AcceptResult::CanonExtension { height: 0 };
     }
 
@@ -515,11 +516,12 @@ pub fn apply_block(
             "[LANE-A] h={} hash={:.8} cw={} peer={:?}",
             blk.header.number, hash, candidate_cw, source_peer
         );
+        if let Err(err) = crate::chain::storage::persist_canonical_extension(g, blk) {
+            return AcceptResult::Rejected(format!("canonical persistence failed: {}", err));
+        }
         g.balances = validated_tx_state.balances;
         g.nonces = validated_tx_state.nonces;
         push_canonical(g, blk.clone(), candidate_cw);
-        let _ = crate::chain::storage::store_block(g, blk);
-        let _ = crate::chain::storage::persist_tip(g);
         let _ = crate::chain::snapshots::maybe_save_snapshot(g);
         let height = blk.header.number;
         crate::chain::orphan::process_orphans(g, &hash);
@@ -531,10 +533,12 @@ pub fn apply_block(
         "[LANE-B] h={} hash={:.8} cw={} tip_cw={} peer={:?}",
         blk.header.number, hash, candidate_cw, tip_cw, source_peer
     );
+    if let Err(err) = crate::chain::storage::store_block(g, blk) {
+        return AcceptResult::Rejected(format!("side-chain persistence failed: {}", err));
+    }
     g.cumulative_work.insert(hash.clone(), candidate_cw);
     g.seen_blocks.insert(hash.clone());
     g.side_blocks.insert(hash.clone(), blk.clone());
-    let _ = crate::chain::storage::store_block(g, blk);
 
     // Attempt a reorg only when this chain has *strictly* more work.
     // Equal-work reorgs are skipped (first-seen wins, reduces state churn).
@@ -543,7 +547,6 @@ pub fn apply_block(
             "[REORG] new tip h={} hash={:.8} cw={}",
             blk.header.number, hash, candidate_cw
         );
-        let _ = crate::chain::storage::persist_tip(g);
         let height = blk.height();
         crate::chain::orphan::process_orphans(g, &hash);
         return AcceptResult::CanonExtension { height };
@@ -631,6 +634,7 @@ pub mod tests_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::storage::load_height_index;
     use super::tests_helpers::make_test_block;
     use crate::config::constants::{DIFFICULTY_FLOOR, LWMA_MIN_INTERVAL_SECS, TARGET_BLOCK_TIME};
     use crate::pow::visionx::historical_block_digest;
@@ -969,6 +973,7 @@ mod tests {
         let ts1 = gen.header.timestamp + LWMA_MIN_INTERVAL_SECS;
         let b1 = make_block(gen.hash(), 1, ts1, 0xAA);
         assert_eq!(apply_block(&mut g, &b1, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(load_height_index(&g, 1).unwrap().as_deref(), Some(b1.hash()));
 
         let ts2 = ts1 + TARGET_BLOCK_TIME;
         let expected_diff = calculate_next_difficulty(&g.blocks, ts2);
@@ -984,6 +989,7 @@ mod tests {
             assert!(reason.contains("PoW"), "rejection reason was: {}", reason);
         }
         assert_eq!(g.blocks.len(), 2, "canonical chain unchanged after bad PoW");
+        assert!(load_height_index(&g, 2).unwrap().is_none());
     }
 
     #[test]
@@ -1373,6 +1379,7 @@ vec![tx0, tx_gap],
         assert_eq!(g.blocks.len(), before_blocks);
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
+        assert_eq!(load_height_index(&g, 2).unwrap().as_deref(), Some(g.blocks[2].hash()));
         assert!(g.side_blocks.contains_key(side_block.hash()));
         assert!(g.cumulative_work.contains_key(side_block.hash()));
     }
@@ -1489,9 +1496,3 @@ vec![tx0, tx_gap],
             "non-monotonic timestamp should be rejected, got {:?}", r);
     }
 }
-
-
-
-
-
-

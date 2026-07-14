@@ -228,6 +228,16 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> bool {
         new_blocks.push(blk.clone());
     }
 
+    let old_tip_height = g.current_height();
+    if let Err(err) = crate::chain::storage::persist_canonical_reorg(
+        g,
+        &new_blocks,
+        old_tip_height,
+    ) {
+        tracing::error!("[REORG] aborted: canonical persistence failed: {}", err);
+        return false;
+    }
+
     g.blocks = new_blocks;
     g.canon_index = new_canon_index;
     g.side_blocks = new_side_blocks;
@@ -275,6 +285,7 @@ mod tests {
     use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
     use crate::genesis::genesis_block;
     use crate::chain::state_root::compute_state_root;
+    use crate::chain::storage::load_height_index;
     use crate::pow::visionx::historical_block_digest;
     use crate::pow::VISIONX_PARAMS;
     use crate::types::transaction::{
@@ -823,6 +834,9 @@ mod tests {
             g.balance_of(&miner_b),
             crate::miner::block_reward(1) + crate::miner::block_reward(2),
         );
+        assert_eq!(load_height_index(&g, 0).unwrap().as_deref(), Some(gen.hash()));
+        assert_eq!(load_height_index(&g, 1).unwrap().as_deref(), Some(side_1.hash()));
+        assert_eq!(load_height_index(&g, 2).unwrap().as_deref(), Some(side_2.hash()));
     }
     #[test]
     fn reorg_switches_to_heavier_chain() {
@@ -1055,30 +1069,3 @@ mod tests {
         assert!(g.side_blocks.contains_key(b2.hash()));
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

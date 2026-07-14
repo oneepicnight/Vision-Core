@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use crate::chain::ChainState;
 use crate::types::Block;
+use sled::Batch;
 
 // ─── Key scheme ───────────────────────────────────────────────────────────────
 //
@@ -18,6 +19,20 @@ use crate::types::Block;
 pub fn store_block(g: &ChainState, block: &Block) -> Result<()> {
     let value = bincode::serialize(block)?;
     g.db.insert(format!("block:{}", block.hash()).as_bytes(), value)?;
+    Ok(())
+}
+
+/// Atomically persist a canonical extension: raw block, height index, and tip.
+pub fn persist_canonical_extension(g: &ChainState, block: &Block) -> Result<()> {
+    let hash = block.hash();
+    let height = block.header.number;
+    let mut batch = Batch::default();
+
+    batch.insert(format!("block:{}", hash).into_bytes(), bincode::serialize(block)?);
+    batch.insert(format!("height:{}", height).into_bytes(), hash.as_bytes());
+    batch.insert(b"meta:tip_height", height.to_string().as_bytes());
+    batch.insert(b"meta:tip_hash", hash.as_bytes());
+    g.db.apply_batch(batch)?;
     Ok(())
 }
 
@@ -50,6 +65,40 @@ pub fn store_height_index(g: &ChainState, height: u64, hash: &str) -> Result<()>
         g.db.insert(b"meta:tip_height", height.to_string().as_bytes())?;
         g.db.insert(b"meta:tip_hash",   hash.as_bytes())?;
     }
+    Ok(())
+}
+
+/// Atomically persist the canonical height sequence after a successful reorg.
+///
+/// Raw side-chain blocks are preserved under block:{hash}. Only the canonical
+/// height index and tip metadata are rewritten.
+pub fn persist_canonical_reorg(
+    g: &ChainState,
+    canonical_blocks: &[Block],
+    previous_tip_height: u64,
+) -> Result<()> {
+    let tip = canonical_blocks
+        .last()
+        .ok_or_else(|| anyhow!("cannot persist empty canonical chain"))?;
+    let new_tip_height = tip.header.number;
+    let mut batch = Batch::default();
+
+    for block in canonical_blocks {
+        let hash = block.hash();
+        batch.insert(format!("block:{}", hash).into_bytes(), bincode::serialize(block)?);
+        batch.insert(
+            format!("height:{}", block.header.number).into_bytes(),
+            hash.as_bytes(),
+        );
+    }
+
+    for height in (new_tip_height + 1)..=previous_tip_height {
+        batch.remove(format!("height:{}", height).into_bytes());
+    }
+
+    batch.insert(b"meta:tip_height", new_tip_height.to_string().as_bytes());
+    batch.insert(b"meta:tip_hash", tip.hash().as_bytes());
+    g.db.apply_batch(batch)?;
     Ok(())
 }
 
@@ -126,10 +175,24 @@ mod tests {
     use crate::chain::state::ChainState;
     use crate::genesis::genesis_block;
     use crate::chain::accept::apply_block;
+    use crate::node::bootstrap::bootstrap_chain;
+    use crate::config::settings::Settings;
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
         ChainState::empty(db)
+    }
+
+    #[test]
+    fn bootstrap_writes_genesis_height_index() {
+        let mut g = temp_state();
+        let settings = Settings::default();
+        bootstrap_chain(&mut g, &settings).unwrap();
+
+        assert_eq!(
+            load_height_index(&g, 0).unwrap().as_deref(),
+            Some(crate::genesis::GENESIS_HASH)
+        );
     }
 
     #[test]
@@ -188,6 +251,40 @@ mod tests {
         store_height_index(&g, 7, &hash).unwrap();
         let loaded = load_height_index(&g, 7).unwrap();
         assert_eq!(loaded.as_deref(), Some(hash.as_str()));
+    }
+
+    #[test]
+    fn canonical_reorg_persistence_removes_stale_height_indexes() {
+        use crate::chain::accept::tests_helpers::make_test_block;
+        use crate::config::constants::TARGET_BLOCK_TIME;
+
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+        let b1 = make_test_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
+        apply_block(&mut g, &b1, None);
+        let b2 = make_test_block(
+            b1.hash(),
+            2,
+            b1.header.timestamp + TARGET_BLOCK_TIME,
+            0xBB,
+        );
+        apply_block(&mut g, &b2, None);
+        assert_eq!(load_height_index(&g, 2).unwrap().as_deref(), Some(b2.hash()));
+
+        persist_canonical_reorg(&g, &[gen.clone(), b1.clone()], 2).unwrap();
+
+        assert_eq!(load_height_index(&g, 0).unwrap().as_deref(), Some(gen.hash()));
+        assert_eq!(load_height_index(&g, 1).unwrap().as_deref(), Some(b1.hash()));
+        assert!(load_height_index(&g, 2).unwrap().is_none());
+        assert_eq!(load_meta(&g, "tip_height").unwrap().as_deref(), Some("1"));
+        assert_eq!(load_meta(&g, "tip_hash").unwrap().as_deref(), Some(b1.hash()));
+        assert!(load_block(&g, b2.hash()).unwrap().is_some());
     }
 
     #[test]
