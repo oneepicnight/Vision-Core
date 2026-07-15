@@ -1,5 +1,7 @@
-use axum::Json;
+use axum::{extract::State, Json};
 use serde::Serialize;
+
+use crate::api::state::NodeApiState;
 
 /// Mining status response.
 #[derive(Serialize)]
@@ -12,13 +14,60 @@ pub struct MiningInfoResponse {
 }
 
 /// GET /mining/info
-pub async fn get_mining_info() -> Json<MiningInfoResponse> {
-    // Stub: wire into MinerManager via Axum State extractor.
-    Json(MiningInfoResponse {
-        enabled:            false,
-        height:             0,
-        difficulty:         1,
-        epoch:              0,
-        hash_rate_estimate: None,
-    })
+pub async fn get_mining_info(State(state): State<NodeApiState>) -> Json<MiningInfoResponse> {
+    // Read-only view of the live runtime miner state.
+    Json(state.mining_info_snapshot().await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::state::NodeApiState;
+    use crate::chain::ChainState;
+    use crate::genesis::genesis_block;
+    use crate::mempool::Mempool;
+    use crate::miner::MinerManager;
+    use crate::pow::visionx::VisionXParams;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn temp_state() -> ChainState {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        ChainState::empty(db)
+    }
+
+    #[tokio::test]
+    async fn mining_info_snapshot_reflects_runtime_state() {
+        let chain = Arc::new(Mutex::new(temp_state()));
+        {
+            let mut chain_guard = chain.lock().await;
+            chain_guard.blocks.push(genesis_block());
+            chain_guard.difficulty = 7;
+        }
+        let state = NodeApiState::new(chain, Arc::new(Mempool::new()))
+            .with_miner_manager(Arc::new(MinerManager::new(VisionXParams::default())));
+
+        let snapshot = state.mining_info_snapshot().await;
+
+        assert!(snapshot.enabled);
+        assert_eq!(snapshot.height, 0);
+        assert_eq!(snapshot.difficulty, 7);
+        assert_eq!(snapshot.epoch, 0);
+        assert_eq!(snapshot.hash_rate_estimate, None);
+    }
+
+    #[tokio::test]
+    async fn mining_info_endpoint_matches_snapshot() {
+        let chain = Arc::new(Mutex::new(temp_state()));
+        let state = NodeApiState::new(chain, Arc::new(Mempool::new()));
+
+        let Json(response) = get_mining_info(State(state.clone())).await;
+        let expected = state.mining_info_snapshot().await;
+
+        assert_eq!(response.enabled, expected.enabled);
+        assert_eq!(response.height, expected.height);
+        assert_eq!(response.difficulty, expected.difficulty);
+        assert_eq!(response.epoch, expected.epoch);
+        assert_eq!(response.hash_rate_estimate, expected.hash_rate_estimate);
+    }
 }
