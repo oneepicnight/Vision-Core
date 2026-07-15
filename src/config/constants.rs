@@ -1,24 +1,24 @@
-//! Protocol constants for vision-core — single source of truth.
+//! Protocol constants for vision-core â€” single source of truth.
 //!
 //! Constants are grouped into two categories, marked clearly below:
 //!
-//! **[CONSENSUS]** — every node on the network must use the same value.
+//! **[CONSENSUS]** â€” every node on the network must use the same value.
 //!   Changing these is a hard fork. Never read from env vars or config files.
 //!
-//! **[POLICY]**    — local node behaviour. Safe to tune without a network
+//! **[POLICY]**    â€” local node behaviour. Safe to tune without a network
 //!   upgrade, though extreme values may degrade interoperability.
 //!
 //! Nothing in this file may be duplicated anywhere else in the codebase.
 //! If you need a constant in another module, import it from here.
 
-// ─── Identity ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Human-readable version shown in the startup banner and handshake.
 pub const NODE_VERSION: &str = "v0.1.0";
 
 /// [CONSENSUS] Wire protocol version. Peers that send a different value are
 /// rejected immediately during handshake.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// [CONSENSUS] Block-header encoding scheme version. Embedded as the first 4
 /// bytes of every `BlockHeader::canonical_bytes()` call and therefore part of
@@ -30,7 +30,7 @@ pub const BLOCK_VERSION: u32 = 1;
 /// disconnected.
 pub const NETWORK_ID: &str = "mainnet";
 
-// ─── Ports ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Ports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Default HTTP API listen port.
 pub const DEFAULT_HTTP_PORT: u16 = 7070;
@@ -39,7 +39,7 @@ pub const DEFAULT_HTTP_PORT: u16 = 7070;
 /// mining coordination.
 pub const DEFAULT_P2P_PORT: u16 = 7072;
 
-// ─── Block timing & difficulty ────────────────────────────────────────────────
+// â”€â”€â”€ Block timing & difficulty â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [CONSENSUS] Target inter-block interval in seconds.
 /// The difficulty retarget algorithm drives the observed average toward this.
@@ -55,7 +55,7 @@ pub const DIFFICULTY_FLOOR: u64 = 1;
 
 /// [CONSENSUS] Multiplier above `TARGET_BLOCK_TIME` at which the wall-clock
 /// stall detector fires and applies an emergency difficulty downshift.
-/// At 4× (120 s with a 30 s target) the network is considered stalled.
+/// At 4Ã— (120 s with a 30 s target) the network is considered stalled.
 pub const STALL_MULTIPLIER: u64 = 4;
 
 /// [CONSENSUS] Fraction of difficulty retained after an emergency downshift.
@@ -75,7 +75,7 @@ pub const LWMA_MIN_INTERVAL_SECS: u64 = TARGET_BLOCK_TIME / 4; // 7 s
 /// Value = TARGET_BLOCK_TIME * 6 = 180 s.
 pub const LWMA_MAX_INTERVAL_SECS: u64 = TARGET_BLOCK_TIME * 6; // 180 s
 
-// ─── Block validation ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Block validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [CONSENSUS] Blocks with a timestamp more than this many seconds ahead of
 /// the local wall clock are rejected as too far in the future.
@@ -97,25 +97,25 @@ pub const FINALITY_DEPTH: u64 = 50;
 /// [CONSENSUS] Maximum serialised weight units allowed per block.
 pub const BLOCK_WEIGHT_LIMIT: u64 = 400_000;
 
-// ─── Block production (node policy) ──────────────────────────────────────────
+// â”€â”€â”€ Block production (node policy) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Soft target number of transactions per block, used when building
 /// the candidate block for mining. Does not affect validation.
 pub const BLOCK_TARGET_TXS: usize = 200;
 
-// ─── Snapshots ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] A full state snapshot is persisted to disk every N blocks.
 /// Snapshots speed up reorg recovery; the interval is a storage/speed trade-off.
 pub const SNAPSHOT_EVERY: u64 = 32;
 
-// ─── Tokenomics ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tokenomics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [CONSENSUS] Decimal precision of the native token (fixed-point divisor = 10^9).
 pub const TOKEN_DECIMALS: u8 = 9;
 
 /// [CONSENSUS] Block subsidy at genesis in raw token units (decimals included).
-/// 510 tokens × 10^9 = 510_000_000_000.
+/// 510 tokens Ã— 10^9 = 510_000_000_000.
 pub const EMISSION_PER_BLOCK: u128 = 510_000_000_000;
 
 /// [CONSENSUS] Blocks between each subsidy halving (~4 years at 30 s/block).
@@ -125,14 +125,14 @@ pub const HALVING_INTERVAL: u64 = 2_102_400;
 /// 1_000 bps = 10 %. Remainder goes to the block producer.
 pub const FEE_BURN_BPS: u32 = 1_000;
 
-// ─── Mining gate ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ Mining gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Minimum number of connected peers with fresh heights required
 /// before the node is allowed to start (or resume) mining. Prevents solo
 /// mining on a partitioned or stalled node.
 pub const MIN_PEERS_FOR_MINING: usize = 1;
 
-// ─── Mempool ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Mempool â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Maximum number of unconfirmed transactions held in memory before
 /// the oldest entry is evicted.
@@ -145,14 +145,14 @@ pub const RATE_SUBMIT_RPS: u64 = 8;
 /// [POLICY] Maximum gossip messages accepted per second from a single peer.
 pub const RATE_GOSSIP_RPS: u64 = 20;
 
-// ─── Orphan pool ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ Orphan pool â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Maximum number of orphan blocks held in memory. When the pool
 /// exceeds this limit the oldest entry is evicted (FIFO). This bounds memory
 /// exposure to missing-parent floods from malicious peers.
 pub const ORPHAN_POOL_MAX: usize = 2_000;
 
-// ─── Peer / P2P ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ Peer / P2P â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] A peer's reported height is considered stale if it has not been
 /// refreshed within this many seconds. Stale peers are excluded from the
@@ -174,7 +174,7 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// Too-frequent gossip disrupts active sync sessions (see Fix 10).
 pub const GOSSIP_INTERVAL_SECS: u64 = 15;
 
-// ─── Sync ─────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Number of blocks the local tip must be behind a peer before the
 /// sync watchdog clears the active mining job to prioritise catch-up.
@@ -185,21 +185,21 @@ pub const SYNC_LAG_THRESHOLD: u64 = 5;
 pub const SYNC_CLEAR_JOB_MIN_LAG: u64 = SYNC_LAG_THRESHOLD;
 
 /// [POLICY] Timeout per binary-search step during fork detection (seconds).
-/// 15 steps × 5 s = 75 s, well within the 120 s outer sync timeout (Fix 13).
+/// 15 steps Ã— 5 s = 75 s, well within the 120 s outer sync timeout (Fix 13).
 pub const SYNC_FORK_SEARCH_TIMEOUT_SECS: u64 = 5;
 
 /// [POLICY] Timeout for the initial tip-hash check at sync start (seconds).
 pub const SYNC_FORK_TIMEOUT_SECS: u64 = 10;
 
 /// [POLICY] Batch timeout (seconds) used when the remaining sync gap is small
-/// (≤ 2 blocks). Avoids a 30 s wait for a gap that will resolve quickly.
+/// (â‰¤ 2 blocks). Avoids a 30 s wait for a gap that will resolve quickly.
 pub const SYNC_SHORT_BATCH_TIMEOUT_SECS: u64 = 5;
 
 /// [POLICY] How long (seconds) to hold the "syncing" gate open after a stall
 /// is detected. Must cover the full stall cooldown plus a safety buffer.
 pub const STALL_OVERRIDE_SECS: u64 = 120;
 
-// ─── VisionX PoW ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ VisionX PoW â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [CONSENSUS] Size of the VisionX base dataset in megabytes.
 pub const VISIONX_DATASET_MB: usize = 256;
@@ -220,7 +220,7 @@ pub const VISIONX_WRITE_EVERY: u32 = 4;
 /// epoch. Miners cache the dataset across `clear_job()` calls within an epoch.
 pub const VISIONX_EPOCH_BLOCKS: u32 = 32;
 
-// ─── Seed peers ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ Seed peers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] Bootstrap peer addresses contacted on first startup. These are
 /// never consensus-critical; the network converges on live peers via gossip.
@@ -233,7 +233,7 @@ pub const DEFAULT_SEED_PEERS: &[&str] = &[
     "182.106.66.15:7072",
 ];
 
-// ─── Unit tests ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ Unit tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn stall_threshold_exceeds_one_block() {
-        // Emergency downshift fires at STALL_MULTIPLIER × TARGET_BLOCK_TIME.
+        // Emergency downshift fires at STALL_MULTIPLIER Ã— TARGET_BLOCK_TIME.
         let stall_secs = STALL_MULTIPLIER * TARGET_BLOCK_TIME;
         assert!(
             stall_secs > TARGET_BLOCK_TIME,
@@ -294,8 +294,7 @@ mod tests {
     fn snapshot_interval_aligns_with_visionx_epoch() {
         // Snapshots at epoch boundaries let reorg recovery skip dataset rebuilds.
         assert_eq!(
-            SNAPSHOT_EVERY,
-            VISIONX_EPOCH_BLOCKS as u64,
+            SNAPSHOT_EVERY, VISIONX_EPOCH_BLOCKS as u64,
             "SNAPSHOT_EVERY should match VISIONX_EPOCH_BLOCKS"
         );
     }
@@ -345,6 +344,9 @@ mod tests {
 
     #[test]
     fn min_peers_for_mining_is_at_least_one() {
-        assert!(MIN_PEERS_FOR_MINING >= 1, "solo mining on a partitioned node must not be allowed");
+        assert!(
+            MIN_PEERS_FOR_MINING >= 1,
+            "solo mining on a partitioned node must not be allowed"
+        );
     }
 }

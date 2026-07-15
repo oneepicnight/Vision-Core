@@ -1,12 +1,50 @@
+use crate::config::constants::{NETWORK_ID, NODE_VERSION, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
-use crate::config::constants::{PROTOCOL_VERSION, NODE_VERSION, NETWORK_ID};
 
-// ─── Handshake ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+/// Canonical chain summary advertised during P2P height polling.
+///
+/// `cumulative_work` is a discovery hint only. A node must still fetch and
+/// validate every block through normal acceptance before changing canonical
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainSummary {
+    pub height: u64,
+    pub tip_hash: Option<String>,
+    pub cumulative_work: u128,
+}
+
+impl ChainSummary {
+    pub fn new(height: u64, tip_hash: Option<String>, cumulative_work: u128) -> Self {
+        Self {
+            height,
+            tip_hash,
+            cumulative_work,
+        }
+    }
+
+    pub fn from_chain(g: &crate::chain::state::ChainState) -> Self {
+        let tip_hash = if g.blocks.is_empty() {
+            None
+        } else {
+            Some(g.tip_hash())
+        };
+        let cumulative_work = tip_hash
+            .as_deref()
+            .and_then(|hash| g.cumulative_work.get(hash).copied())
+            .unwrap_or(0);
+        Self {
+            height: g.current_height(),
+            tip_hash,
+            cumulative_work,
+        }
+    }
+}
 
 /// Exchanged immediately after TCP connection establishment (both directions).
 ///
 /// Peers whose `protocol_version`, `genesis_hash`, `chain_id`, or `econ_hash`
-/// do not match MUST be disconnected immediately — they are on a different
+/// do not match MUST be disconnected immediately â€” they are on a different
 /// network, a different fork, or running incompatible economics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeMessage {
@@ -33,11 +71,11 @@ pub struct HandshakeMessage {
     /// Human-readable version tag for diagnostics only (e.g. `"v0.1.0"`).
     pub node_tag: String,
 
-    /// Economics fingerprint — must match `ECON_HASH` on all nodes to prevent
+    /// Economics fingerprint â€” must match `ECON_HASH` on all nodes to prevent
     /// silently mis-matched reward schedules from forming a parallel network.
     pub econ_hash: String,
 
-    /// VisionX PoW params fingerprint — must match on all nodes.
+    /// VisionX PoW params fingerprint â€” must match on all nodes.
     pub pow_params_hash: String,
 
     /// Advertised external IP for inbound peer routing (optional).
@@ -55,7 +93,7 @@ impl HandshakeMessage {
     ///
     /// `node_nonce` should be a fresh random value per connection.
     pub fn new(chain_height: u64, node_nonce: u64) -> Self {
-        use crate::genesis::genesis::{GENESIS_HASH, ECON_HASH};
+        use crate::genesis::genesis::{ECON_HASH, GENESIS_HASH};
         use crate::pow::visionx::VISIONX_PARAMS;
 
         let chain_id = {
@@ -71,21 +109,21 @@ impl HandshakeMessage {
         Self {
             protocol_version: PROTOCOL_VERSION,
             chain_id,
-            genesis_hash:     GENESIS_HASH.to_string(),
+            genesis_hash: GENESIS_HASH.to_string(),
             node_nonce,
             chain_height,
-            network_id:       NETWORK_ID.to_string(),
-            node_tag:         NODE_VERSION.to_string(),
-            econ_hash:        ECON_HASH.to_string(),
-            pow_params_hash:  VISIONX_PARAMS.fingerprint(),
-            advertised_ip:    None,
-            advertised_port:  None,
-            seed_peers:       vec![],
+            network_id: NETWORK_ID.to_string(),
+            node_tag: NODE_VERSION.to_string(),
+            econ_hash: ECON_HASH.to_string(),
+            pow_params_hash: VISIONX_PARAMS.fingerprint(),
+            advertised_ip: None,
+            advertised_port: None,
+            seed_peers: vec![],
         }
     }
 }
 
-// ─── Handshake validation ─────────────────────────────────────────────────────
+// â”€â”€â”€ Handshake validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Outcome of validating a remote peer's handshake message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,11 +136,11 @@ pub enum HandshakeResult {
     WrongChainId,
     /// `genesis_hash` string differs from `GENESIS_HASH`.
     WrongGenesisHash,
-    /// `econ_hash` differs — remote runs different economics.
+    /// `econ_hash` differs â€” remote runs different economics.
     WrongEconHash,
-    /// `pow_params_hash` differs — remote uses different PoW params.
+    /// `pow_params_hash` differs â€” remote uses different PoW params.
     WrongPowParams,
-    /// Remote's `node_nonce` matches our own — self-connection detected.
+    /// Remote's `node_nonce` matches our own â€” self-connection detected.
     SelfConnection,
 }
 
@@ -110,7 +148,7 @@ pub enum HandshakeResult {
 ///
 /// `our_nonce` is the nonce we sent in *our* handshake on this connection.
 pub fn validate_handshake(remote: &HandshakeMessage, our_nonce: u64) -> HandshakeResult {
-    use crate::genesis::genesis::{GENESIS_HASH, ECON_HASH};
+    use crate::genesis::genesis::{ECON_HASH, GENESIS_HASH};
     use crate::pow::visionx::VISIONX_PARAMS;
 
     if remote.node_nonce == our_nonce {
@@ -119,10 +157,10 @@ pub fn validate_handshake(remote: &HandshakeMessage, our_nonce: u64) -> Handshak
     if remote.protocol_version != PROTOCOL_VERSION {
         return HandshakeResult::VersionMismatch {
             remote: remote.protocol_version,
-            ours:   PROTOCOL_VERSION,
+            ours: PROTOCOL_VERSION,
         };
     }
-    // chain_id encodes genesis + network in one field — check it first.
+    // chain_id encodes genesis + network in one field â€” check it first.
     let expected_chain_id = {
         let mut input = Vec::new();
         input.extend_from_slice(GENESIS_HASH.as_bytes());
@@ -147,7 +185,7 @@ pub fn validate_handshake(remote: &HandshakeMessage, our_nonce: u64) -> Handshak
     HandshakeResult::Accepted
 }
 
-// ─── Block gossip protocol ────────────────────────────────────────────────────
+// â”€â”€â”€ Block gossip protocol â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Lightweight block announcement broadcast to all connected peers.
 ///
@@ -159,11 +197,11 @@ pub struct AnnounceBlock {
     pub height: u64,
     /// PoW hash of the announced block (hex-encoded, 64 chars).
     pub hash: String,
-    /// Parent hash — allows orphan detection without fetching the block first.
+    /// Parent hash â€” allows orphan detection without fetching the block first.
     pub prev: String,
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -175,7 +213,7 @@ mod tests {
         HandshakeMessage::new(height, nonce)
     }
 
-    // ── HandshakeMessage::new ─────────────────────────────────────────────────
+    // â”€â”€ HandshakeMessage::new â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn new_sets_correct_protocol_version() {
@@ -193,7 +231,10 @@ mod tests {
     fn new_chain_id_is_deterministic() {
         let a = our_hs(0, 1);
         let b = our_hs(5, 99);
-        assert_eq!(a.chain_id, b.chain_id, "chain_id must not depend on height/nonce");
+        assert_eq!(
+            a.chain_id, b.chain_id,
+            "chain_id must not depend on height/nonce"
+        );
     }
 
     #[test]
@@ -203,14 +244,17 @@ mod tests {
         assert_eq!(hs.node_nonce, 7777);
     }
 
-    // ── validate_handshake — happy path ───────────────────────────────────────
+    // â”€â”€ validate_handshake â€” happy path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn valid_peer_is_accepted() {
         let our_nonce = 100;
         let their_nonce = 999;
         let peer = our_hs(10, their_nonce);
-        assert_eq!(validate_handshake(&peer, our_nonce), HandshakeResult::Accepted);
+        assert_eq!(
+            validate_handshake(&peer, our_nonce),
+            HandshakeResult::Accepted
+        );
     }
 
     #[test]
@@ -220,13 +264,16 @@ mod tests {
         assert_eq!(validate_handshake(&peer, 1), HandshakeResult::Accepted);
     }
 
-    // ── validate_handshake — rejection cases ─────────────────────────────────
+    // â”€â”€ validate_handshake â€” rejection cases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn self_connection_detected() {
         let nonce = 55;
         let hs = our_hs(0, nonce);
-        assert_eq!(validate_handshake(&hs, nonce), HandshakeResult::SelfConnection);
+        assert_eq!(
+            validate_handshake(&hs, nonce),
+            HandshakeResult::SelfConnection
+        );
     }
 
     #[test]
@@ -237,7 +284,7 @@ mod tests {
             validate_handshake(&peer, 1),
             HandshakeResult::VersionMismatch {
                 remote: PROTOCOL_VERSION + 1,
-                ours:   PROTOCOL_VERSION,
+                ours: PROTOCOL_VERSION,
             }
         );
     }
@@ -260,10 +307,16 @@ mod tests {
         input.extend_from_slice(GENESIS_HASH.as_bytes());
         input.extend_from_slice(NETWORK_ID.as_bytes());
         let hash = blake3::hash(&input);
-        hash.as_bytes().iter().enumerate().for_each(|(i, &b)| peer.chain_id[i] = b);
+        hash.as_bytes()
+            .iter()
+            .enumerate()
+            .for_each(|(i, &b)| peer.chain_id[i] = b);
         // Now flip just genesis_hash.
         peer.genesis_hash = "0".repeat(64);
-        assert_eq!(validate_handshake(&peer, 1), HandshakeResult::WrongGenesisHash);
+        assert_eq!(
+            validate_handshake(&peer, 1),
+            HandshakeResult::WrongGenesisHash
+        );
     }
 
     #[test]
@@ -277,17 +330,20 @@ mod tests {
     fn wrong_pow_params_rejected() {
         let mut peer = our_hs(0, 2);
         peer.pow_params_hash = "wrongparams".to_string();
-        assert_eq!(validate_handshake(&peer, 1), HandshakeResult::WrongPowParams);
+        assert_eq!(
+            validate_handshake(&peer, 1),
+            HandshakeResult::WrongPowParams
+        );
     }
 
-    // ── AnnounceBlock ─────────────────────────────────────────────────────────
+    // â”€â”€ AnnounceBlock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn announce_block_serde_round_trip() {
         let ann = AnnounceBlock {
             height: 100,
-            hash:   "aabb".to_string(),
-            prev:   "ccdd".to_string(),
+            hash: "aabb".to_string(),
+            prev: "ccdd".to_string(),
         };
         let bytes = bincode::serialize(&ann).unwrap();
         let rt: AnnounceBlock = bincode::deserialize(&bytes).unwrap();

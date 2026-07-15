@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use crate::chain::state::ChainState;
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
-use crate::p2p::protocol::{validate_handshake, HandshakeMessage, HandshakeResult};
+use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeMessage, HandshakeResult};
 
 /// Maximum wire message size: 16 MiB.
 ///
@@ -50,7 +50,11 @@ where
     r.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);
     if len > MAX_MESSAGE_BYTES {
-        anyhow::bail!("oversized message: {} bytes (max {})", len, MAX_MESSAGE_BYTES);
+        anyhow::bail!(
+            "oversized message: {} bytes (max {})",
+            len,
+            MAX_MESSAGE_BYTES
+        );
     }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf).await?;
@@ -90,7 +94,6 @@ impl P2PConnectionManager {
     pub(crate) fn local_node_nonce(&self) -> u64 {
         self.local_node_nonce
     }
-
 
     /// Accept inbound connections in a loop, spawning one task per connection.
     pub async fn run_listener(self: Arc<Self>) -> Result<()> {
@@ -139,7 +142,10 @@ fn derive_local_node_nonce(listen_addr: SocketAddr) -> u64 {
 fn handshake_reject_reason(result: &HandshakeResult) -> String {
     match result {
         HandshakeResult::VersionMismatch { remote, ours } => {
-            format!("unsupported protocol version: remote={} ours={}", remote, ours)
+            format!(
+                "unsupported protocol version: remote={} ours={}",
+                remote, ours
+            )
         }
         HandshakeResult::WrongChainId => "wrong chain identity".to_string(),
         HandshakeResult::WrongGenesisHash => "wrong genesis hash".to_string(),
@@ -194,14 +200,21 @@ async fn handle_inbound<S>(
                             HandshakeResult::Accepted => {
                                 peer_manager.upsert(&addr.to_string(), false);
                                 peer_manager.set_state(&addr.to_string(), PeerState::Connected);
-                                peer_manager.note_peer_height(&addr.to_string(), remote_hs.chain_height, false);
+                                peer_manager.note_peer_height(
+                                    &addr.to_string(),
+                                    remote_hs.chain_height,
+                                    false,
+                                );
                                 tracing::info!(
                                     "[P2P] {} handshake complete local_height={} remote_height={}",
                                     addr,
                                     our_height,
                                     remote_hs.chain_height
                                 );
-                                if let Err(e) = send_message(&mut stream, &P2PMessage::Handshake(local_hs)).await {
+                                if let Err(e) =
+                                    send_message(&mut stream, &P2PMessage::Handshake(local_hs))
+                                        .await
+                                {
                                     tracing::warn!("[P2P] {} handshake send error: {}", addr, e);
                                     break;
                                 }
@@ -239,17 +252,11 @@ async fn handle_inbound<S>(
                             tracing::warn!("[P2P] {} getheight before handshake - closing", addr);
                             break;
                         }
-                        let (height, tip_hash) = {
+                        let summary = {
                             let g = chain.lock().await;
-                            let height = g.current_height();
-                            let tip_hash = if g.blocks.is_empty() {
-                                None
-                            } else {
-                                Some(g.tip_hash())
-                            };
-                            (height, tip_hash)
+                            ChainSummary::from_chain(&g)
                         };
-                        let reply = P2PMessage::Height { height, tip_hash };
+                        let reply = P2PMessage::Height { summary };
                         if let Err(e) = send_message(&mut stream, &reply).await {
                             tracing::warn!("[P2P] {} height send error: {}", addr, e);
                             break;
@@ -267,7 +274,9 @@ async fn handle_inbound<S>(
                         };
                         match block {
                             Some(block) => {
-                                if let Err(e) = send_message(&mut stream, &P2PMessage::Block { block }).await {
+                                if let Err(e) =
+                                    send_message(&mut stream, &P2PMessage::Block { block }).await
+                                {
                                     tracing::warn!("[P2P] {} block send error: {}", addr, e);
                                     break;
                                 }
@@ -289,7 +298,11 @@ async fn handle_inbound<S>(
                     }
                     other => {
                         if !handshake_done {
-                            tracing::warn!("[P2P] {} sent {} before handshake - closing", addr, other.label());
+                            tracing::warn!(
+                                "[P2P] {} sent {} before handshake - closing",
+                                addr,
+                                other.label()
+                            );
                             break;
                         }
                         tracing::debug!("[P2P] {} {} (unhandled)", addr, other.label());
@@ -366,11 +379,14 @@ mod tests {
 
     #[tokio::test]
     async fn height_response_frames_correctly() {
-        let msg = P2PMessage::Height { height: 77, tip_hash: Some("tip".to_string()) };
+        let msg = P2PMessage::Height {
+            summary: ChainSummary::new(77, Some("tip".to_string()), 100),
+        };
         match wire_rt(msg).await {
-            P2PMessage::Height { height, tip_hash } => {
-                assert_eq!(height, 77);
-                assert_eq!(tip_hash.unwrap(), "tip");
+            P2PMessage::Height { summary } => {
+                assert_eq!(summary.height, 77);
+                assert_eq!(summary.tip_hash.unwrap(), "tip");
+                assert_eq!(summary.cumulative_work, 100);
             }
             _ => panic!("wrong variant"),
         }
@@ -378,7 +394,11 @@ mod tests {
 
     #[tokio::test]
     async fn announce_block_frames_correctly() {
-        let ann = AnnounceBlock { height: 5, hash: "hh".to_string(), prev: "pp".to_string() };
+        let ann = AnnounceBlock {
+            height: 5,
+            hash: "hh".to_string(),
+            prev: "pp".to_string(),
+        };
         match wire_rt(P2PMessage::AnnounceBlock(ann)).await {
             P2PMessage::AnnounceBlock(a) => {
                 assert_eq!(a.height, 5);
@@ -390,7 +410,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_block_frames_correctly() {
-        let msg = P2PMessage::GetBlock { hash: "myhash".to_string() };
+        let msg = P2PMessage::GetBlock {
+            hash: "myhash".to_string(),
+        };
         match wire_rt(msg).await {
             P2PMessage::GetBlock { hash } => assert_eq!(hash, "myhash"),
             _ => panic!("wrong variant"),
@@ -421,7 +443,9 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_frames_correctly() {
-        let msg = P2PMessage::Disconnect { reason: "test".to_string() };
+        let msg = P2PMessage::Disconnect {
+            reason: "test".to_string(),
+        };
         match wire_rt(msg).await {
             P2PMessage::Disconnect { reason } => assert_eq!(reason, "test"),
             _ => panic!("wrong variant"),
@@ -438,19 +462,36 @@ mod tests {
         let err = recv_message(&mut rx).await;
         assert!(err.is_err(), "oversized message should produce an error");
         let msg = err.unwrap_err().to_string();
-        assert!(msg.contains("oversized"), "error should mention oversized: {}", msg);
+        assert!(
+            msg.contains("oversized"),
+            "error should mention oversized: {}",
+            msg
+        );
     }
 
     #[tokio::test]
     async fn multiple_messages_frame_independently() {
         let (mut tx, mut rx) = duplex(64 * 1024);
-        send_message(&mut tx, &P2PMessage::Ping { timestamp: 1 }).await.unwrap();
+        send_message(&mut tx, &P2PMessage::Ping { timestamp: 1 })
+            .await
+            .unwrap();
         send_message(&mut tx, &P2PMessage::GetHeight).await.unwrap();
-        send_message(&mut tx, &P2PMessage::Pong { timestamp: 2 }).await.unwrap();
+        send_message(&mut tx, &P2PMessage::Pong { timestamp: 2 })
+            .await
+            .unwrap();
 
-        assert!(matches!(recv_message(&mut rx).await.unwrap(), P2PMessage::Ping { timestamp: 1 }));
-        assert!(matches!(recv_message(&mut rx).await.unwrap(), P2PMessage::GetHeight));
-        assert!(matches!(recv_message(&mut rx).await.unwrap(), P2PMessage::Pong { timestamp: 2 }));
+        assert!(matches!(
+            recv_message(&mut rx).await.unwrap(),
+            P2PMessage::Ping { timestamp: 1 }
+        ));
+        assert!(matches!(
+            recv_message(&mut rx).await.unwrap(),
+            P2PMessage::GetHeight
+        ));
+        assert!(matches!(
+            recv_message(&mut rx).await.unwrap(),
+            P2PMessage::Pong { timestamp: 2 }
+        ));
     }
 
     // -- handshake validation wiring ----------------------------------------
@@ -471,19 +512,29 @@ mod tests {
         ));
 
         let remote = HandshakeMessage::new(17, local_nonce + 1);
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         let reply = recv_message(&mut client).await.unwrap();
         let local_hs = accepted_handshake_response(reply, local_nonce);
-        assert_eq!(local_hs.protocol_version, crate::config::constants::PROTOCOL_VERSION);
+        assert_eq!(
+            local_hs.protocol_version,
+            crate::config::constants::PROTOCOL_VERSION
+        );
 
-        send_message(&mut client, &P2PMessage::Ping { timestamp: 42 }).await.unwrap();
+        send_message(&mut client, &P2PMessage::Ping { timestamp: 42 })
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Pong { timestamp } => assert_eq!(timestamp, 42),
             other => panic!("expected pong, got {:?}", other),
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(peer_manager.connected_count(), 1);
         assert_eq!(peer_manager.best_remote_height(), 17);
     }
@@ -494,11 +545,19 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
         remote.chain_id = [0xAA; 32];
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Disconnect { reason } => {
                 assert_eq!(reason, "wrong chain identity");
@@ -507,7 +566,10 @@ mod tests {
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -517,11 +579,19 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
         remote.genesis_hash = "00".repeat(32);
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Disconnect { reason } => {
                 assert_eq!(reason, "wrong genesis hash");
@@ -530,7 +600,10 @@ mod tests {
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -540,11 +613,19 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
         remote.econ_hash = "bad".repeat(16);
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Disconnect { reason } => {
                 assert_eq!(reason, "wrong economic version");
@@ -553,7 +634,10 @@ mod tests {
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -563,11 +647,19 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
         remote.pow_params_hash = "bad".repeat(16);
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Disconnect { reason } => {
                 assert_eq!(reason, "wrong pow/consensus version");
@@ -576,7 +668,10 @@ mod tests {
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -586,11 +681,19 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
         remote.protocol_version = crate::config::constants::PROTOCOL_VERSION + 1;
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Disconnect { reason } => {
                 assert_eq!(
@@ -606,7 +709,10 @@ mod tests {
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -616,10 +722,18 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         let remote = HandshakeMessage::new(0, local_nonce);
-        send_message(&mut client, &P2PMessage::Handshake(remote)).await.unwrap();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
         match recv_message(&mut client).await.unwrap() {
             P2PMessage::Disconnect { reason } => {
                 assert_eq!(reason, "self-connection rejected");
@@ -628,7 +742,10 @@ mod tests {
         }
 
         drop(client);
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -638,14 +755,21 @@ mod tests {
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(server, addr, chain, peer_manager, local_nonce));
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+        ));
 
         client.write_all(&4u32.to_be_bytes()).await.unwrap();
         client.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
         drop(client);
 
-        timeout(Duration::from_secs(2), handle).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
-
-

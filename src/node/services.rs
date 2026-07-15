@@ -13,8 +13,8 @@ use crate::miner::MinerManager;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
+use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeMessage, HandshakeResult};
 use crate::p2p::sync::SyncGuard;
-use crate::p2p::protocol::{validate_handshake, HandshakeMessage, HandshakeResult};
 use crate::types::transaction::canonical_tx_id;
 
 /// Spawn all background services for a running node.
@@ -29,7 +29,11 @@ pub async fn start_services(
     settings: &Settings,
 ) -> Result<()> {
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
-    let conn_mgr = Arc::new(P2PConnectionManager::new(p2p_addr, chain.clone(), peer_manager.clone()));
+    let conn_mgr = Arc::new(P2PConnectionManager::new(
+        p2p_addr,
+        chain.clone(),
+        peer_manager.clone(),
+    ));
 
     {
         let mgr = conn_mgr.clone();
@@ -47,7 +51,14 @@ pub async fn start_services(
             let conn_mgr_ref = conn_mgr.clone();
             let mempool_ref = mempool.clone();
             tokio::spawn(async move {
-                seed_peer_loop(chain_ref, peer_manager_ref, conn_mgr_ref, mempool_ref, seed_peer).await;
+                seed_peer_loop(
+                    chain_ref,
+                    peer_manager_ref,
+                    conn_mgr_ref,
+                    mempool_ref,
+                    seed_peer,
+                )
+                .await;
             });
         }
     }
@@ -62,7 +73,15 @@ pub async fn start_services(
             let mut sync_guard = crate::p2p::sync::SyncGuard::new();
             loop {
                 interval.tick().await;
-                if let Err(e) = crate::p2p::sync::watchdog_step(&mgr, &chain_ref, &pm, &mut sync_guard, Some(mempool_ref.as_ref())).await {
+                if let Err(e) = crate::p2p::sync::watchdog_step(
+                    &mgr,
+                    &chain_ref,
+                    &pm,
+                    &mut sync_guard,
+                    Some(mempool_ref.as_ref()),
+                )
+                .await
+                {
                     tracing::warn!("[SYNC] Watchdog error: {}", e);
                 }
             }
@@ -116,13 +135,15 @@ pub async fn start_services(
                     let Some(block) = mined else {
                         continue;
                     };
-                    let confirmed_tx_ids: Vec<String> = block.txs.iter().map(canonical_tx_id).collect();
+                    let confirmed_tx_ids: Vec<String> =
+                        block.txs.iter().map(canonical_tx_id).collect();
                     let mut chain_guard = chain_ref.lock().await;
                     match miner_manager.submit_solution(&mut chain_guard, block) {
                         AcceptResult::CanonExtension { .. } => {
                             mempool_ref.remove_confirmed(&confirmed_tx_ids);
                             if let Some(recovery) = chain_guard.pending_reorg_recovery.take() {
-                                let report = mempool_ref.requeue_after_reorg(&chain_guard, recovery);
+                                let report =
+                                    mempool_ref.requeue_after_reorg(&chain_guard, recovery);
                                 tracing::info!(
                                     "[MEMPOOL] reorg recovery accepted={} rejected={}",
                                     report.accepted.len(),
@@ -197,7 +218,11 @@ async fn seed_peer_loop(
                         continue;
                     }
                     Ok(other) => {
-                        tracing::warn!("[P2P] {} unexpected reply during handshake: {}", peer_addr, other.label());
+                        tracing::warn!(
+                            "[P2P] {} unexpected reply during handshake: {}",
+                            peer_addr,
+                            other.label()
+                        );
                         peer_manager.set_state(&peer_addr, PeerState::Disconnected);
                         tokio::time::sleep(reconnect_delay).await;
                         continue;
@@ -226,13 +251,20 @@ async fn seed_peer_loop(
                     other => {
                         let reason = match other {
                             HandshakeResult::VersionMismatch { remote, ours } => {
-                                format!("unsupported protocol version: remote={} ours={}", remote, ours)
+                                format!(
+                                    "unsupported protocol version: remote={} ours={}",
+                                    remote, ours
+                                )
                             }
                             HandshakeResult::WrongChainId => "wrong chain identity".to_string(),
                             HandshakeResult::WrongGenesisHash => "wrong genesis hash".to_string(),
                             HandshakeResult::WrongEconHash => "wrong economic version".to_string(),
-                            HandshakeResult::WrongPowParams => "wrong pow/consensus version".to_string(),
-                            HandshakeResult::SelfConnection => "self-connection rejected".to_string(),
+                            HandshakeResult::WrongPowParams => {
+                                "wrong pow/consensus version".to_string()
+                            }
+                            HandshakeResult::SelfConnection => {
+                                "self-connection rejected".to_string()
+                            }
                             HandshakeResult::Accepted => "handshake accepted".to_string(),
                         };
                         let _ = send_message(&mut stream, &P2PMessage::Disconnect { reason }).await;
@@ -243,32 +275,54 @@ async fn seed_peer_loop(
                 }
 
                 loop {
-                    let remote_height = match poll_peer_height(&mut stream, &peer_addr, &chain, &peer_manager).await {
-                        Ok(height) => height,
+                    let remote_summary = match poll_peer_height(
+                        &mut stream,
+                        &peer_addr,
+                        &chain,
+                        &peer_manager,
+                    )
+                    .await
+                    {
+                        Ok(summary) => summary,
                         Err(e) => {
                             tracing::debug!("[P2P] {} height poll error: {}", peer_addr, e);
                             break;
                         }
                     };
-                    let local_height = chain.lock().await.current_height();
+                    let local_summary = {
+                        let g = chain.lock().await;
+                        ChainSummary::from_chain(&g)
+                    };
+                    let remote_has_more_work = remote_summary.cumulative_work
+                        > local_summary.cumulative_work
+                        && remote_summary.tip_hash != local_summary.tip_hash;
                     tracing::debug!(
-                        "[SYNC] height compare peer={} local={} remote={} lag={}",
+                        "[SYNC] summary compare peer={} local_h={} local_work={} remote_h={} remote_work={} lag={} tip_diff={}",
                         peer_addr,
-                        local_height,
-                        remote_height,
-                        remote_height.saturating_sub(local_height)
+                        local_summary.height,
+                        local_summary.cumulative_work,
+                        remote_summary.height,
+                        remote_summary.cumulative_work,
+                        remote_summary.height.saturating_sub(local_summary.height),
+                        remote_summary.tip_hash != local_summary.tip_hash
                     );
-                    if remote_height > local_height {
-                        let lag = remote_height - local_height;
+                    if remote_summary.height > local_summary.height || remote_has_more_work {
+                        let lag = remote_summary.height.saturating_sub(local_summary.height);
                         tracing::info!(
-                            "[SYNC] lagging peer={} local_height={} remote_height={} lag={}",
+                            "[SYNC] peer candidate={} local_height={} local_work={} remote_height={} remote_work={} lag={} work_ahead={}",
                             peer_addr,
-                            local_height,
-                            remote_height,
-                            lag
+                            local_summary.height,
+                            local_summary.cumulative_work,
+                            remote_summary.height,
+                            remote_summary.cumulative_work,
+                            lag,
+                            remote_has_more_work
                         );
                         if sync_guard.is_blocked() {
-                            tracing::trace!("[SYNC] {} catch-up skipped (sync in progress or throttled)", peer_addr);
+                            tracing::trace!(
+                                "[SYNC] {} catch-up skipped (sync in progress or throttled)",
+                                peer_addr
+                            );
                         } else {
                             sync_guard.mark_started();
                             let result = crate::p2p::sync::live_sync_from_peer(
@@ -281,7 +335,11 @@ async fn seed_peer_loop(
                             .await;
                             sync_guard.mark_done();
                             if let Err(e) = result {
-                                tracing::warn!("[SYNC] catch-up trigger error for {}: {}", peer_addr, e);
+                                tracing::warn!(
+                                    "[SYNC] catch-up trigger error for {}: {}",
+                                    peer_addr,
+                                    e
+                                );
                                 break;
                             }
                         }
@@ -296,14 +354,20 @@ async fn seed_peer_loop(
                         break;
                     }
 
-                    match tokio::time::timeout(Duration::from_secs(5), recv_message(&mut stream)).await {
+                    match tokio::time::timeout(Duration::from_secs(5), recv_message(&mut stream))
+                        .await
+                    {
                         Ok(Ok(P2PMessage::Pong { .. })) => {}
                         Ok(Ok(P2PMessage::Disconnect { reason })) => {
                             tracing::debug!("[P2P] {} disconnected: {}", peer_addr, reason);
                             break;
                         }
                         Ok(Ok(other)) => {
-                            tracing::debug!("[P2P] {} unexpected keepalive reply: {}", peer_addr, other.label());
+                            tracing::debug!(
+                                "[P2P] {} unexpected keepalive reply: {}",
+                                peer_addr,
+                                other.label()
+                            );
                         }
                         Ok(Err(e)) => {
                             tracing::debug!("[P2P] {} keepalive read error: {}", peer_addr, e);
@@ -333,27 +397,40 @@ async fn poll_peer_height(
     peer_addr: &str,
     chain: &Arc<Mutex<ChainState>>,
     peer_manager: &Arc<PeerManager>,
-) -> Result<u64> {
+) -> Result<ChainSummary> {
+    peer_manager.record_height_poll_sent(peer_addr);
     send_message(stream, &P2PMessage::GetHeight).await?;
-    let (remote_height, remote_tip_hash) = match tokio::time::timeout(Duration::from_secs(5), recv_message(stream)).await {
-        Ok(Ok(P2PMessage::Height { height, tip_hash })) => (height, tip_hash),
-        Ok(Ok(P2PMessage::Disconnect { reason })) => {
-            return Err(anyhow::anyhow!("peer rejected height query: {}", reason))
-        }
-        Ok(Ok(other)) => return Err(anyhow::anyhow!("unexpected height reply: {}", other.label())),
-        Ok(Err(e)) => return Err(anyhow::anyhow!("height poll read error: {}", e)),
-        Err(_) => return Err(anyhow::anyhow!("height poll timeout for {}", peer_addr)),
+    let remote_summary =
+        match tokio::time::timeout(Duration::from_secs(5), recv_message(stream)).await {
+            Ok(Ok(P2PMessage::Height { summary })) => summary,
+            Ok(Ok(P2PMessage::Disconnect { reason })) => {
+                return Err(anyhow::anyhow!("peer rejected height query: {}", reason))
+            }
+            Ok(Ok(other)) => {
+                return Err(anyhow::anyhow!(
+                    "unexpected height reply: {}",
+                    other.label()
+                ))
+            }
+            Ok(Err(e)) => return Err(anyhow::anyhow!("height poll read error: {}", e)),
+            Err(_) => return Err(anyhow::anyhow!("height poll timeout for {}", peer_addr)),
+        };
+    peer_manager.note_peer_summary(peer_addr, remote_summary.clone(), false);
+    let local_summary = {
+        let g = chain.lock().await;
+        ChainSummary::from_chain(&g)
     };
-    peer_manager.note_peer_height(peer_addr, remote_height, false);
-    let local_height = chain.lock().await.current_height();
     tracing::debug!(
-        "[P2P] {} learned remote height={} local_height={} tip_hash={:?}",
+        "[P2P] {} learned remote summary height={} work={} tip={:?} local_height={} local_work={} local_tip={:?}",
         peer_addr,
-        remote_height,
-        local_height,
-        remote_tip_hash
+        remote_summary.height,
+        remote_summary.cumulative_work,
+        remote_summary.tip_hash,
+        local_summary.height,
+        local_summary.cumulative_work,
+        local_summary.tip_hash
     );
-    Ok(remote_height)
+    Ok(remote_summary)
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -362,7 +439,6 @@ fn unix_timestamp_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -388,8 +464,16 @@ mod tests {
                 P2PMessage::GetHeight => {
                     send_message(
                         &mut server,
-                        &P2PMessage::Height { height, tip_hash: Some(format!("{:064x}", height)) },
-                    ).await.unwrap();
+                        &P2PMessage::Height {
+                            summary: ChainSummary::new(
+                                height,
+                                Some(format!("{:064x}", height)),
+                                height as u128,
+                            ),
+                        },
+                    )
+                    .await
+                    .unwrap();
                 }
                 other => panic!("expected height request, got {:?}", other),
             }
@@ -405,8 +489,11 @@ mod tests {
         pm.upsert(peer_addr, true);
         pm.set_state(peer_addr, PeerState::Connected);
         let (mut client, handle) = scripted_height_peer(42).await;
-        let remote_height = poll_peer_height(&mut client, peer_addr, &chain, &pm).await.unwrap();
-        assert_eq!(remote_height, 42);
+        let remote_summary = poll_peer_height(&mut client, peer_addr, &chain, &pm)
+            .await
+            .unwrap();
+        assert_eq!(remote_summary.height, 42);
+        assert_eq!(remote_summary.cumulative_work, 42);
         assert_eq!(pm.best_remote_height(), 42);
         handle.await.unwrap();
     }
@@ -423,7 +510,4 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(pm.best_remote_height(), 0);
     }
-
 }
-
-

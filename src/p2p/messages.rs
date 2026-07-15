@@ -1,42 +1,38 @@
-use serde::{Deserialize, Serialize};
+use crate::p2p::protocol::{AnnounceBlock, ChainSummary, HandshakeMessage};
 use crate::types::Block;
-use crate::p2p::protocol::{AnnounceBlock, HandshakeMessage};
+use serde::{Deserialize, Serialize};
 
 /// All message types exchanged between peers over the TCP P2P connection.
 ///
-/// This is the **core** message set — only what is needed for liveness,
+/// This is the **core** message set â€” only what is needed for liveness,
 /// height exchange, and block propagation. Adding a new variant is a protocol
 /// change that requires bumping `PROTOCOL_VERSION`.
 ///
 /// Encoding: bincode, length-prefixed (see `connection::send_message`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum P2PMessage {
-    // ── Handshake ─────────────────────────────────────────────────────────────
-
+    // â”€â”€ Handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// First message sent on **both** sides of every new connection.
     ///
     /// Peers MUST close the connection if any field fails validation:
     /// `protocol_version`, `genesis_hash`, `chain_id`, or `econ_hash`.
     Handshake(HandshakeMessage),
 
-    // ── Liveness ─────────────────────────────────────────────────────────────
-
+    // â”€â”€ Liveness â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Keep-alive probe; carries the sender's UNIX timestamp (seconds).
     Ping { timestamp: u64 },
 
-    /// Keep-alive reply — MUST echo the exact `timestamp` from the Ping.
+    /// Keep-alive reply â€” MUST echo the exact `timestamp` from the Ping.
     Pong { timestamp: u64 },
 
-    // ── Height exchange ───────────────────────────────────────────────────────
-
-    /// Ask a peer for its current chain-tip height and hash.
+    // â”€â”€ Height exchange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    /// Ask a peer for its current canonical chain summary.
     GetHeight,
 
     /// Response to `GetHeight`.
-    Height { height: u64, tip_hash: Option<String> },
+    Height { summary: ChainSummary },
 
-    // ── Block propagation ─────────────────────────────────────────────────────
-
+    // â”€â”€ Block propagation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Lightweight block announcement. Receivers request the full block only
     /// if they have not already seen `hash`.
     AnnounceBlock(AnnounceBlock),
@@ -44,11 +40,10 @@ pub enum P2PMessage {
     /// Request a single block by its PoW hash.
     GetBlock { hash: String },
 
-    /// Full block body — response to `GetBlock` or unsolicited push after mining.
+    /// Full block body â€” response to `GetBlock` or unsolicited push after mining.
     Block { block: Block },
 
-    // ── Connection management ─────────────────────────────────────────────────
-
+    // â”€â”€ Connection management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Graceful disconnect with a human-readable reason string.
     Disconnect { reason: String },
 }
@@ -60,14 +55,14 @@ impl P2PMessage {
     /// without having to print the full message payload.
     pub fn label(&self) -> &'static str {
         match self {
-            P2PMessage::Handshake(_)     => "Handshake",
-            P2PMessage::Ping { .. }      => "Ping",
-            P2PMessage::Pong { .. }      => "Pong",
-            P2PMessage::GetHeight        => "GetHeight",
-            P2PMessage::Height { .. }    => "Height",
+            P2PMessage::Handshake(_) => "Handshake",
+            P2PMessage::Ping { .. } => "Ping",
+            P2PMessage::Pong { .. } => "Pong",
+            P2PMessage::GetHeight => "GetHeight",
+            P2PMessage::Height { .. } => "Height",
             P2PMessage::AnnounceBlock(_) => "AnnounceBlock",
-            P2PMessage::GetBlock { .. }  => "GetBlock",
-            P2PMessage::Block { .. }     => "Block",
+            P2PMessage::GetBlock { .. } => "GetBlock",
+            P2PMessage::Block { .. } => "Block",
             P2PMessage::Disconnect { .. } => "Disconnect",
         }
     }
@@ -77,17 +72,20 @@ impl P2PMessage {
     /// Only `Handshake` and `Disconnect` are valid pre-handshake; all other
     /// messages from an unverified peer should be dropped.
     pub fn is_pre_handshake(&self) -> bool {
-        matches!(self, P2PMessage::Handshake(_) | P2PMessage::Disconnect { .. })
+        matches!(
+            self,
+            P2PMessage::Handshake(_) | P2PMessage::Disconnect { .. }
+        )
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::protocol::HandshakeMessage;
     use crate::genesis::genesis_block;
+    use crate::p2p::protocol::HandshakeMessage;
 
     // Helper: bincode round-trip.
     fn rt(msg: &P2PMessage) -> P2PMessage {
@@ -95,12 +93,19 @@ mod tests {
         bincode::deserialize(&bytes).expect("deserialize")
     }
 
-    // ── encode / decode ───────────────────────────────────────────────────────
+    // â”€â”€ encode / decode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn ping_round_trips() {
-        let rt = rt(&P2PMessage::Ping { timestamp: 1_700_000_000 });
-        assert!(matches!(rt, P2PMessage::Ping { timestamp: 1_700_000_000 }));
+        let rt = rt(&P2PMessage::Ping {
+            timestamp: 1_700_000_000,
+        });
+        assert!(matches!(
+            rt,
+            P2PMessage::Ping {
+                timestamp: 1_700_000_000
+            }
+        ));
     }
 
     #[test]
@@ -116,11 +121,14 @@ mod tests {
 
     #[test]
     fn height_with_hash_round_trips() {
-        let msg = P2PMessage::Height { height: 42, tip_hash: Some("abc".to_string()) };
+        let msg = P2PMessage::Height {
+            summary: ChainSummary::new(42, Some("abc".to_string()), 100),
+        };
         match rt(&msg) {
-            P2PMessage::Height { height, tip_hash } => {
-                assert_eq!(height, 42);
-                assert_eq!(tip_hash.unwrap(), "abc");
+            P2PMessage::Height { summary } => {
+                assert_eq!(summary.height, 42);
+                assert_eq!(summary.tip_hash.unwrap(), "abc");
+                assert_eq!(summary.cumulative_work, 100);
             }
             _ => panic!("wrong variant"),
         }
@@ -128,11 +136,14 @@ mod tests {
 
     #[test]
     fn height_with_none_hash_round_trips() {
-        let msg = P2PMessage::Height { height: 0, tip_hash: None };
+        let msg = P2PMessage::Height {
+            summary: ChainSummary::new(0, None, 0),
+        };
         match rt(&msg) {
-            P2PMessage::Height { height, tip_hash } => {
-                assert_eq!(height, 0);
-                assert!(tip_hash.is_none());
+            P2PMessage::Height { summary } => {
+                assert_eq!(summary.height, 0);
+                assert!(summary.tip_hash.is_none());
+                assert_eq!(summary.cumulative_work, 0);
             }
             _ => panic!("wrong variant"),
         }
@@ -140,7 +151,11 @@ mod tests {
 
     #[test]
     fn announce_block_round_trips() {
-        let ann = AnnounceBlock { height: 7, hash: "aabbcc".to_string(), prev: "001122".to_string() };
+        let ann = AnnounceBlock {
+            height: 7,
+            hash: "aabbcc".to_string(),
+            prev: "001122".to_string(),
+        };
         match rt(&P2PMessage::AnnounceBlock(ann)) {
             P2PMessage::AnnounceBlock(a) => {
                 assert_eq!(a.height, 7);
@@ -153,7 +168,9 @@ mod tests {
 
     #[test]
     fn get_block_round_trips() {
-        let msg = P2PMessage::GetBlock { hash: "hashXYZ".to_string() };
+        let msg = P2PMessage::GetBlock {
+            hash: "hashXYZ".to_string(),
+        };
         match rt(&msg) {
             P2PMessage::GetBlock { hash } => assert_eq!(hash, "hashXYZ"),
             _ => panic!("wrong variant"),
@@ -172,7 +189,9 @@ mod tests {
 
     #[test]
     fn disconnect_round_trips() {
-        let msg = P2PMessage::Disconnect { reason: "test bye".to_string() };
+        let msg = P2PMessage::Disconnect {
+            reason: "test bye".to_string(),
+        };
         match rt(&msg) {
             P2PMessage::Disconnect { reason } => assert_eq!(reason, "test bye"),
             _ => panic!("wrong variant"),
@@ -191,7 +210,7 @@ mod tests {
         }
     }
 
-    // ── label ─────────────────────────────────────────────────────────────────
+    // â”€â”€ label â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn all_variants_have_distinct_labels() {
@@ -201,11 +220,23 @@ mod tests {
             P2PMessage::Ping { timestamp: 0 },
             P2PMessage::Pong { timestamp: 0 },
             P2PMessage::GetHeight,
-            P2PMessage::Height { height: 0, tip_hash: None },
-            P2PMessage::AnnounceBlock(AnnounceBlock { height: 0, hash: String::new(), prev: String::new() }),
-            P2PMessage::GetBlock { hash: String::new() },
-            P2PMessage::Block { block: genesis_block() },
-            P2PMessage::Disconnect { reason: String::new() },
+            P2PMessage::Height {
+                summary: ChainSummary::new(0, None, 0),
+            },
+            P2PMessage::AnnounceBlock(AnnounceBlock {
+                height: 0,
+                hash: String::new(),
+                prev: String::new(),
+            }),
+            P2PMessage::GetBlock {
+                hash: String::new(),
+            },
+            P2PMessage::Block {
+                block: genesis_block(),
+            },
+            P2PMessage::Disconnect {
+                reason: String::new(),
+            },
         ];
         let labels: HashSet<_> = msgs.iter().map(|m| m.label()).collect();
         assert_eq!(labels.len(), msgs.len(), "duplicate labels");
@@ -218,14 +249,20 @@ mod tests {
         assert_eq!(P2PMessage::Pong { timestamp: 0 }.label(), "Pong");
     }
 
-    // ── is_pre_handshake ──────────────────────────────────────────────────────
+    // â”€â”€ is_pre_handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn only_handshake_and_disconnect_allowed_pre_handshake() {
         assert!(P2PMessage::Handshake(HandshakeMessage::new(0, 0)).is_pre_handshake());
-        assert!(P2PMessage::Disconnect { reason: String::new() }.is_pre_handshake());
+        assert!(P2PMessage::Disconnect {
+            reason: String::new()
+        }
+        .is_pre_handshake());
         assert!(!P2PMessage::Ping { timestamp: 0 }.is_pre_handshake());
         assert!(!P2PMessage::GetHeight.is_pre_handshake());
-        assert!(!P2PMessage::GetBlock { hash: String::new() }.is_pre_handshake());
+        assert!(!P2PMessage::GetBlock {
+            hash: String::new()
+        }
+        .is_pre_handshake());
     }
 }
