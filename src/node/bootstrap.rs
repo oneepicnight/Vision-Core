@@ -9,7 +9,6 @@ use crate::chain::ChainState;
 use crate::config::settings::Settings;
 use crate::genesis::genesis::{genesis_block, validate_genesis_hash, verify_stored_genesis};
 
-
 /// Initialise the chain from scratch or verify an existing database.
 ///
 /// 1. Validates the compile-time genesis hash constant.
@@ -80,7 +79,9 @@ fn replay_stored_canonical_tail(g: &mut ChainState, restored_height: u64) -> Res
         }
 
         match apply_block(g, &block, None) {
-            AcceptResult::CanonExtension { height: applied_height } if applied_height == height => {
+            AcceptResult::CanonExtension {
+                height: applied_height,
+            } if applied_height == height => {
                 g.refresh_cached_state_root_from_tip();
                 tracing::debug!(
                     "[BOOTSTRAP] Replayed canonical block h={} hash={:.8}",
@@ -107,6 +108,71 @@ fn replay_stored_canonical_tail(g: &mut ChainState, restored_height: u64) -> Res
     Ok(tip_height)
 }
 
+fn rebuild_canonical_state_from_genesis(g: &mut ChainState) -> Result<u64> {
+    let tip_height: u64 = load_meta(g, "tip_height")?
+        .ok_or_else(|| anyhow!("missing persisted tip height during full startup recovery"))?
+        .parse()?;
+
+    let mut blocks = Vec::new();
+    for height in 0..=tip_height {
+        let hash = load_height_index(g, height)?
+            .ok_or_else(|| anyhow!("missing canonical height index at h={}", height))?;
+        let block = load_block(g, &hash)?
+            .ok_or_else(|| anyhow!("missing canonical block {} at h={}", hash, height))?;
+        if block.header.number != height {
+            return Err(anyhow!(
+                "startup rebuild block height mismatch at h={}: block reports {}",
+                height,
+                block.header.number
+            ));
+        }
+        blocks.push(block);
+    }
+
+    g.blocks.clear();
+    g.canon_index.clear();
+    g.cumulative_work.clear();
+    g.seen_blocks.clear();
+    g.balances.clear();
+    g.nonces.clear();
+    g.cached_state_root = None;
+
+    tracing::info!(
+        "[BOOTSTRAP] Rebuilding canonical state from genesis through h={} before services start",
+        tip_height
+    );
+
+    for block in blocks {
+        let height = block.header.number;
+        match apply_block(g, &block, None) {
+            AcceptResult::CanonExtension {
+                height: applied_height,
+            } if applied_height == height => {
+                g.refresh_cached_state_root_from_tip();
+                tracing::debug!(
+                    "[BOOTSTRAP] Rebuilt canonical block h={} hash={:.8}",
+                    height,
+                    block.hash()
+                );
+            }
+            other => {
+                return Err(anyhow!(
+                    "startup rebuild rejected h={} hash={:.8}: {:?}",
+                    height,
+                    block.hash(),
+                    other
+                ));
+            }
+        }
+    }
+
+    tracing::info!(
+        "[BOOTSTRAP] Rebuilt canonical tip h={} hash={}",
+        g.current_height(),
+        g.tip_hash()
+    );
+    Ok(tip_height)
+}
 /// Open, bootstrap, and restore the latest available snapshot for a node.
 ///
 /// Fresh databases are left at genesis when no snapshot exists yet. Existing
@@ -131,7 +197,18 @@ pub fn initialize_chain_state(settings: &Settings) -> Result<ChainState> {
             }
         }
         Err(e) => {
-            tracing::debug!("[BOOTSTRAP] No snapshot restored on startup: {}", e);
+            if current_height > 0 {
+                tracing::warn!(
+                    "[BOOTSTRAP] No valid canonical snapshot restored on startup: {}; rebuilding from genesis",
+                    e
+                );
+                if let Err(rebuild_err) = rebuild_canonical_state_from_genesis(&mut chain_state) {
+                    tracing::error!("[BOOTSTRAP] Full canonical rebuild failed: {}", rebuild_err);
+                    return Err(rebuild_err);
+                }
+            } else {
+                tracing::debug!("[BOOTSTRAP] No snapshot restored on startup: {}", e);
+            }
         }
     }
 
@@ -189,8 +266,13 @@ mod tests {
             ts += TARGET_BLOCK_TIME;
             let block = make_test_block(&prev, height, ts, 0xA0u8.wrapping_add(height as u8));
             match apply_block(&mut chain, &block, None) {
-                AcceptResult::CanonExtension { height: applied_height } => assert_eq!(applied_height, height),
-                other => panic!("expected canonical extension at h={}, got {:?}", height, other),
+                AcceptResult::CanonExtension {
+                    height: applied_height,
+                } => assert_eq!(applied_height, height),
+                other => panic!(
+                    "expected canonical extension at h={}, got {:?}",
+                    height, other
+                ),
             }
 
             if height == snapshot_height {
@@ -205,10 +287,20 @@ mod tests {
             prev = block.hash().to_string();
         }
 
-        Ok((tip_hash, tip_root, miner.clone(), chain.balance_of(&miner), chain.nonce_of(&miner)))
+        Ok((
+            tip_hash,
+            tip_root,
+            miner.clone(),
+            chain.balance_of(&miner),
+            chain.nonce_of(&miner),
+        ))
     }
 
-    fn run_recovery_worker(data_dir: &Path, expect_fail: bool, check_block_hash: Option<&str>) -> Result<String> {
+    fn run_recovery_worker(
+        data_dir: &Path,
+        expect_fail: bool,
+        check_block_hash: Option<&str>,
+    ) -> Result<String> {
         let exe = std::env::current_exe()?;
         let output_file = data_dir.join("bootstrap-worker.out");
         let mut cmd = Command::new(exe);
@@ -253,14 +345,68 @@ mod tests {
         let output = run_recovery_worker(recovery_dir.path(), false, None)?;
         let values = parse_kv(&output);
         assert_eq!(values.get("height").map(String::as_str), Some("66"));
-        assert_eq!(values.get("tip_hash").map(String::as_str), Some(tip_hash.as_str()));
-        assert_eq!(values.get("state_root").map(String::as_str), Some(tip_root.as_str()));
-        assert_eq!(values.get("balance").map(String::as_str), Some(expected_balance.to_string().as_str()));
-        assert_eq!(values.get("nonce").map(String::as_str), Some(expected_nonce.to_string().as_str()));
-        assert_eq!(values.get("miner").map(String::as_str), Some(miner.as_str()));
+        assert_eq!(
+            values.get("tip_hash").map(String::as_str),
+            Some(tip_hash.as_str())
+        );
+        assert_eq!(
+            values.get("state_root").map(String::as_str),
+            Some(tip_root.as_str())
+        );
+        assert_eq!(
+            values.get("balance").map(String::as_str),
+            Some(expected_balance.to_string().as_str())
+        );
+        assert_eq!(
+            values.get("nonce").map(String::as_str),
+            Some(expected_nonce.to_string().as_str())
+        );
+        assert_eq!(
+            values.get("miner").map(String::as_str),
+            Some(miner.as_str())
+        );
         Ok(())
     }
 
+    #[test]
+    fn initialize_chain_state_rebuilds_from_genesis_when_snapshot_lineage_is_stale() -> Result<()> {
+        let recovery_dir = tempfile::tempdir()?;
+        let (tip_hash, tip_root, miner, expected_balance, expected_nonce) =
+            build_chain_with_snapshot(recovery_dir.path(), 2, 4)?;
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+
+        let chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
+        chain.db.insert(
+            b"meta:snapshot:2",
+            bincode::serialize(&(2u64, "aa".repeat(32).as_str()))?,
+        )?;
+        drop(chain);
+
+        let output = run_recovery_worker(recovery_dir.path(), false, None)?;
+        let values = parse_kv(&output);
+        assert_eq!(values.get("height").map(String::as_str), Some("4"));
+        assert_eq!(
+            values.get("tip_hash").map(String::as_str),
+            Some(tip_hash.as_str())
+        );
+        assert_eq!(
+            values.get("state_root").map(String::as_str),
+            Some(tip_root.as_str())
+        );
+        assert_eq!(
+            values.get("balance").map(String::as_str),
+            Some(expected_balance.to_string().as_str())
+        );
+        assert_eq!(
+            values.get("nonce").map(String::as_str),
+            Some(expected_nonce.to_string().as_str())
+        );
+        assert_eq!(
+            values.get("miner").map(String::as_str),
+            Some(miner.as_str())
+        );
+        Ok(())
+    }
     #[test]
     fn initialize_chain_state_rejects_missing_height_index() -> Result<()> {
         let recovery_dir = tempfile::tempdir()?;
@@ -284,7 +430,8 @@ mod tests {
         let mut chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
         let block_65_hash = chain.db.get(b"height:65")?.unwrap();
         let block_65_hash = String::from_utf8(block_65_hash.to_vec())?;
-        let mut block_65 = load_block(&chain, &block_65_hash)?.expect("canonical block 65 should exist");
+        let mut block_65 =
+            load_block(&chain, &block_65_hash)?.expect("canonical block 65 should exist");
         block_65.header.state_root = "f".repeat(64);
         store_block(&chain, &block_65)?;
         drop(chain);
@@ -315,11 +462,26 @@ mod tests {
         let output = run_recovery_worker(recovery_dir.path(), false, Some(side_block.hash()))?;
         let values = parse_kv(&output);
         assert_eq!(values.get("height").map(String::as_str), Some("66"));
-        assert_eq!(values.get("state_root").map(String::as_str), Some(tip_root.as_str()));
-        assert_eq!(values.get("miner").map(String::as_str), Some(miner.as_str()));
-        assert_eq!(values.get("balance").map(String::as_str), Some(expected_balance.to_string().as_str()));
-        assert_eq!(values.get("nonce").map(String::as_str), Some(expected_nonce.to_string().as_str()));
-        assert_eq!(values.get("block_present").map(String::as_str), Some("false"));
+        assert_eq!(
+            values.get("state_root").map(String::as_str),
+            Some(tip_root.as_str())
+        );
+        assert_eq!(
+            values.get("miner").map(String::as_str),
+            Some(miner.as_str())
+        );
+        assert_eq!(
+            values.get("balance").map(String::as_str),
+            Some(expected_balance.to_string().as_str())
+        );
+        assert_eq!(
+            values.get("nonce").map(String::as_str),
+            Some(expected_nonce.to_string().as_str())
+        );
+        assert_eq!(
+            values.get("block_present").map(String::as_str),
+            Some("false")
+        );
         Ok(())
     }
 
@@ -328,11 +490,17 @@ mod tests {
     fn bootstrap_recovery_worker() -> Result<()> {
         let data_dir = std::env::var("VISION_BOOTSTRAP_WORKER_DIR")?;
         let output_file = std::env::var("VISION_BOOTSTRAP_WORKER_OUT")?;
-        let expect_fail = std::env::var("VISION_BOOTSTRAP_EXPECT_FAIL").ok().as_deref() == Some("1");
+        let expect_fail = std::env::var("VISION_BOOTSTRAP_EXPECT_FAIL")
+            .ok()
+            .as_deref()
+            == Some("1");
         let settings = test_settings(Path::new(&data_dir));
         let output = match initialize_chain_state(&settings) {
             Ok(chain) if expect_fail => {
-                format!("error=expected startup recovery to fail, but it succeeded at height {}\n", chain.current_height())
+                format!(
+                    "error=expected startup recovery to fail, but it succeeded at height {}\n",
+                    chain.current_height()
+                )
             }
             Ok(chain) => {
                 let block_present = std::env::var("VISION_BOOTSTRAP_CHECK_BLOCK_HASH")
@@ -367,17 +535,3 @@ mod tests {
             .unwrap_or_default()
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-

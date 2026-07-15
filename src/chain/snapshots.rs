@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 
 use crate::chain::state_root::compute_state_root;
+use crate::chain::storage::{load_block, load_height_index};
 use crate::chain::ChainState;
 use crate::config::constants::SNAPSHOT_EVERY;
 
@@ -29,8 +30,13 @@ pub fn maybe_save_snapshot(g: &ChainState) -> Result<()> {
 /// Unconditionally write a full-state snapshot at `height`.
 pub fn save_snapshot(g: &ChainState, height: u64) -> Result<()> {
     let tip_hash = g.tip_hash();
-    let state_root = compute_state_root(&g.balances, &g.nonces)
-        .map_err(|e| anyhow!("snapshot state root computation failed at h={}: {:?}", height, e))?;
+    let state_root = compute_state_root(&g.balances, &g.nonces).map_err(|e| {
+        anyhow!(
+            "snapshot state root computation failed at h={}: {:?}",
+            height,
+            e
+        )
+    })?;
 
     // Serialise account state.
     g.db.insert(
@@ -80,56 +86,125 @@ fn normalize_snapshot_state(
 /// The caller is responsible for re-applying any blocks that were above the
 /// restored height (typically by requesting them from peers).
 pub fn restore_latest_snapshot(g: &mut ChainState, max_height: u64) -> Result<u64> {
-    // Enumerate all snapshot heights stored in the database.
-    let snap_heights: Vec<u64> = g
-        .db
-        .scan_prefix(b"meta:snapshot:")
-        .flatten()
-        .filter_map(|(k, _)| {
-            let s = String::from_utf8(k.to_vec()).ok()?;
-            let h: u64 = s.strip_prefix("meta:snapshot:")?.parse().ok()?;
-            if h <= max_height {
-                Some(h)
-            } else {
-                None
+    // Enumerate all snapshot heights stored in the database. Newest snapshots
+    // are preferred, but height alone is not trusted: the stored snapshot hash
+    // and root must match the persisted canonical block at that height.
+    let mut snap_heights: Vec<u64> =
+        g.db.scan_prefix(b"meta:snapshot:")
+            .flatten()
+            .filter_map(|(k, _)| {
+                let s = String::from_utf8(k.to_vec()).ok()?;
+                let h: u64 = s.strip_prefix("meta:snapshot:")?.parse().ok()?;
+                (h <= max_height).then_some(h)
+            })
+            .collect();
+    snap_heights.sort_unstable_by(|a, b| b.cmp(a));
+
+    let mut rejection_reasons = Vec::new();
+    for height in snap_heights {
+        match restore_snapshot_at(g, height) {
+            Ok(()) => {
+                tracing::info!("[SNAPSHOT] Restored state to height {}", height);
+                return Ok(height);
             }
-        })
-        .collect();
-
-    let best = snap_heights
-        .into_iter()
-        .max()
-        .ok_or_else(|| anyhow!("no snapshot at or below h={}", max_height))?;
-
-    // Restore account state.
-    if let Some(bytes) = g.db.get(format!("snap:balances:{}", best).as_bytes())? {
-        g.balances = bincode::deserialize(&bytes)?;
+            Err(err) => {
+                tracing::warn!(
+                    "[SNAPSHOT] Rejecting snapshot at height {} during startup restore: {}",
+                    height,
+                    err
+                );
+                rejection_reasons.push(format!("h{}: {}", height, err));
+            }
+        }
     }
-    if let Some(bytes) = g.db.get(format!("snap:nonces:{}", best).as_bytes())? {
-        g.nonces = bincode::deserialize(&bytes)?;
+
+    if rejection_reasons.is_empty() {
+        Err(anyhow!("no snapshot at or below h={}", max_height))
+    } else {
+        Err(anyhow!(
+            "no valid canonical snapshot at or below h={}: {}",
+            max_height,
+            rejection_reasons.join("; ")
+        ))
     }
-    normalize_snapshot_state(&mut g.balances, &mut g.nonces);
+}
 
-    let computed_state_root = compute_state_root(&g.balances, &g.nonces)
-        .map_err(|e| anyhow!("restored snapshot state is invalid at h={}: {:?}", best, e))?;
+fn restore_snapshot_at(g: &mut ChainState, height: u64) -> Result<()> {
+    let metadata_bytes =
+        g.db.get(format!("meta:snapshot:{}", height).as_bytes())?
+            .ok_or_else(|| anyhow!("missing snapshot metadata"))?;
+    let (metadata_height, snapshot_hash): (u64, String) = bincode::deserialize(&metadata_bytes)?;
+    if metadata_height != height {
+        return Err(anyhow!(
+            "snapshot metadata height mismatch: key={} metadata={}",
+            height,
+            metadata_height
+        ));
+    }
 
-    if let Some(bytes) = g
-        .db
-        .get(format!("meta:snapshot_state_root:{}", best).as_bytes())?
+    let canonical_hash = load_height_index(g, height)?
+        .ok_or_else(|| anyhow!("missing canonical height index at h={}", height))?;
+    if snapshot_hash != canonical_hash {
+        return Err(anyhow!(
+            "snapshot hash {} does not match canonical hash {} at h={}",
+            snapshot_hash,
+            canonical_hash,
+            height
+        ));
+    }
+    let canonical_block = load_block(g, &canonical_hash)?
+        .ok_or_else(|| anyhow!("canonical block {} missing at h={}", canonical_hash, height))?;
+
+    let mut balances: BTreeMap<String, u128> =
+        g.db.get(format!("snap:balances:{}", height).as_bytes())?
+            .map(|bytes| bincode::deserialize(&bytes))
+            .transpose()?
+            .unwrap_or_default();
+    let mut nonces: BTreeMap<String, u64> =
+        g.db.get(format!("snap:nonces:{}", height).as_bytes())?
+            .map(|bytes| bincode::deserialize(&bytes))
+            .transpose()?
+            .unwrap_or_default();
+    normalize_snapshot_state(&mut balances, &mut nonces);
+
+    let computed_state_root = compute_state_root(&balances, &nonces).map_err(|e| {
+        anyhow!(
+            "restored snapshot state is invalid at h={}: {:?}",
+            height,
+            e
+        )
+    })?;
+
+    if let Some(bytes) =
+        g.db.get(format!("meta:snapshot_state_root:{}", height).as_bytes())?
     {
         let stored_state_root: String = bincode::deserialize(&bytes)?;
         if stored_state_root != computed_state_root {
             return Err(anyhow!(
                 "snapshot state root mismatch at h={}: stored={} computed={}",
-                best,
+                height,
                 stored_state_root,
                 computed_state_root
             ));
         }
     }
 
+    let is_genesis_dev_snapshot =
+        height == 0 && canonical_block.header.state_root == "0".repeat(64);
+    if canonical_block.header.state_root != computed_state_root && !is_genesis_dev_snapshot {
+        return Err(anyhow!(
+            "snapshot state root {} does not match canonical block root {} at h={}",
+            computed_state_root,
+            canonical_block.header.state_root,
+            height
+        ));
+    }
+
+    g.balances = balances;
+    g.nonces = nonces;
+
     // Truncate canonical block Vec.
-    let keep = (best + 1) as usize;
+    let keep = (height + 1) as usize;
     if g.blocks.len() > keep {
         g.blocks.truncate(keep);
     }
@@ -149,12 +224,9 @@ pub fn restore_latest_snapshot(g: &mut ChainState, max_height: u64) -> Result<u6
         g.seen_blocks.insert(b.hash().to_string());
     }
 
-    g.cached_state_root = Some((best, computed_state_root));
-
-    tracing::info!("[SNAPSHOT] Restored state to height {}", best);
-    Ok(best)
+    g.cached_state_root = Some((height, computed_state_root));
+    Ok(())
 }
-
 // --- Tests ---
 
 #[cfg(test)]
@@ -189,6 +261,28 @@ mod tests {
         (g, blocks)
     }
 
+    fn build_chain_n_with_snapshots(
+        n: u64,
+        snapshot_heights: &[u64],
+    ) -> (ChainState, Vec<crate::types::Block>) {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        apply_block(&mut g, &gen, None);
+        let mut blocks = vec![gen.clone()];
+        let mut prev = gen.hash().to_string();
+        let mut ts = gen.header.timestamp;
+        for i in 1..=n {
+            ts += TARGET_BLOCK_TIME;
+            let blk = make_test_block(&prev, i, ts, (0xA0 + i) as u8);
+            apply_block(&mut g, &blk, None);
+            prev = blk.hash().to_string();
+            blocks.push(blk);
+            if snapshot_heights.contains(&i) {
+                save_snapshot(&g, i).unwrap();
+            }
+        }
+        (g, blocks)
+    }
     #[test]
     fn snapshot_restore_preserves_coinbase_reward_balance() {
         let (mut g, blocks) = build_chain_n(1);
@@ -261,7 +355,10 @@ mod tests {
         let mut g = temp_state();
         let gen = genesis_block();
         apply_block(&mut g, &gen, None);
-        g.credit_balance("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1);
+        g.credit_balance(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+        );
         save_snapshot(&g, 0).unwrap();
 
         g.db.insert(
@@ -286,11 +383,8 @@ mod tests {
 
         let mut balances = BTreeMap::new();
         balances.insert("not-hex".to_string(), 1);
-        g.db.insert(
-            b"snap:balances:0",
-            bincode::serialize(&balances).unwrap(),
-        )
-        .unwrap();
+        g.db.insert(b"snap:balances:0", bincode::serialize(&balances).unwrap())
+            .unwrap();
 
         assert!(restore_latest_snapshot(&mut g, 0).is_err());
     }
@@ -307,11 +401,8 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
             1,
         );
-        g.db.insert(
-            b"snap:nonces:0",
-            bincode::serialize(&nonces).unwrap(),
-        )
-        .unwrap();
+        g.db.insert(b"snap:nonces:0", bincode::serialize(&nonces).unwrap())
+            .unwrap();
 
         assert!(restore_latest_snapshot(&mut g, 0).is_err());
     }
@@ -321,8 +412,10 @@ mod tests {
         let mut g = temp_state();
         let gen = genesis_block();
         apply_block(&mut g, &gen, None);
-        let zero_balance = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
-        let zero_nonce = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let zero_balance =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let zero_nonce =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
         let active = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
         g.balances.insert(zero_balance.clone(), 0);
         g.nonces.insert(zero_nonce.clone(), 0);
@@ -347,10 +440,8 @@ mod tests {
 
     #[test]
     fn restore_truncates_blocks_to_snapshot_height() {
-        let (mut g, blocks) = build_chain_n(4);
+        let (mut g, _blocks) = build_chain_n_with_snapshots(4, &[2]);
         assert_eq!(g.current_height(), 4);
-
-        save_snapshot(&g, 2).unwrap();
 
         let restored = restore_latest_snapshot(&mut g, 4).unwrap();
         assert_eq!(restored, 2);
@@ -360,8 +451,7 @@ mod tests {
 
     #[test]
     fn restore_rebuilds_canon_index() {
-        let (mut g, blocks) = build_chain_n(3);
-        save_snapshot(&g, 2).unwrap();
+        let (mut g, blocks) = build_chain_n_with_snapshots(3, &[2]);
         g.canon_index.clear();
 
         restore_latest_snapshot(&mut g, 3).unwrap();
@@ -408,15 +498,74 @@ mod tests {
 
     #[test]
     fn restore_rebuilds_cumulative_work() {
-        let (mut g, blocks) = build_chain_n(3);
-        save_snapshot(&g, 2).unwrap();
+        let (mut g, blocks) = build_chain_n_with_snapshots(3, &[2]);
         g.cumulative_work.clear();
 
         restore_latest_snapshot(&mut g, 3).unwrap();
-        let cw = g.cumulative_work.get(blocks[2].hash()).copied().unwrap_or(0);
+        let cw = g
+            .cumulative_work
+            .get(blocks[2].hash())
+            .copied()
+            .unwrap_or(0);
         assert_eq!(cw, 3 * crate::config::constants::DIFFICULTY_FLOOR as u128);
     }
 
+    #[test]
+    fn restore_rejects_snapshot_with_wrong_block_hash() {
+        let (mut g, blocks) = build_chain_n(2);
+        save_snapshot(&g, 2).unwrap();
+        g.db.insert(
+            b"meta:snapshot:2",
+            bincode::serialize(&(2u64, blocks[1].hash())).unwrap(),
+        )
+        .unwrap();
+
+        let result = restore_latest_snapshot(&mut g, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn restore_rejects_snapshot_with_correct_hash_but_wrong_block_root() {
+        let (mut g, blocks) = build_chain_n(2);
+        save_snapshot(&g, 2).unwrap();
+
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let balances = BTreeMap::from([(key, 1u128)]);
+        let nonces = BTreeMap::new();
+        let wrong_root = compute_state_root(&balances, &nonces).unwrap();
+        assert_ne!(wrong_root, blocks[2].header.state_root);
+
+        g.db.insert(b"snap:balances:2", bincode::serialize(&balances).unwrap())
+            .unwrap();
+        g.db.insert(b"snap:nonces:2", bincode::serialize(&nonces).unwrap())
+            .unwrap();
+        g.db.insert(
+            b"meta:snapshot_state_root:2",
+            bincode::serialize(&wrong_root).unwrap(),
+        )
+        .unwrap();
+
+        let result = restore_latest_snapshot(&mut g, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn restore_selects_newest_valid_canonical_snapshot() {
+        let (mut g, blocks) = build_chain_n_with_snapshots(4, &[2, 4]);
+        g.db.insert(
+            b"meta:snapshot:4",
+            bincode::serialize(&(4u64, blocks[3].hash())).unwrap(),
+        )
+        .unwrap();
+
+        let restored = restore_latest_snapshot(&mut g, 4).unwrap();
+        assert_eq!(restored, 2);
+        assert_eq!(g.current_height(), 2);
+        assert_eq!(
+            g.cached_state_root,
+            Some((2, blocks[2].header.state_root.clone()))
+        );
+    }
     #[test]
     fn restore_fails_when_no_snapshot_exists() {
         let mut g = temp_state();
@@ -430,7 +579,9 @@ mod tests {
         let count_before: usize = g.db.scan_prefix(b"meta:snapshot:").count();
         maybe_save_snapshot(&g).unwrap();
         let count_after: usize = g.db.scan_prefix(b"meta:snapshot:").count();
-        assert_eq!(count_before, count_after, "should not save at non-multiple height");
+        assert_eq!(
+            count_before, count_after,
+            "should not save at non-multiple height"
+        );
     }
 }
-
