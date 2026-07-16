@@ -74,6 +74,9 @@ pub struct P2PConnectionManager {
     chain: Arc<Mutex<ChainState>>,
     peer_manager: Arc<PeerManager>,
     local_node_nonce: u64,
+    advertised_ip: Option<String>,
+    advertised_port: Option<u16>,
+    allow_private_peer_addresses: bool,
 }
 
 impl P2PConnectionManager {
@@ -88,8 +91,36 @@ impl P2PConnectionManager {
             chain,
             peer_manager,
             local_node_nonce,
+            advertised_ip: None,
+            advertised_port: None,
+            allow_private_peer_addresses: true,
         }
     }
+
+    pub fn new_with_advertised(
+        listen_addr: SocketAddr,
+        chain: Arc<Mutex<ChainState>>,
+        peer_manager: Arc<PeerManager>,
+        advertised_ip: Option<String>,
+        advertised_port: Option<u16>,
+        allow_private_peer_addresses: bool,
+    ) -> Self {
+        let mut manager = Self::new(listen_addr, chain, peer_manager);
+        manager.advertised_ip = advertised_ip;
+        manager.advertised_port = advertised_port;
+        manager.allow_private_peer_addresses = allow_private_peer_addresses;
+        manager
+    }
+
+    pub(crate) fn local_handshake(&self, chain_height: u64) -> HandshakeMessage {
+        HandshakeMessage::new_with_advertised(
+            chain_height,
+            self.local_node_nonce,
+            self.advertised_ip.clone(),
+            self.advertised_port,
+        )
+    }
+
     /// Nonce used in the local handshake for self-connection detection.
     pub(crate) fn local_node_nonce(&self) -> u64 {
         self.local_node_nonce
@@ -107,8 +138,21 @@ impl P2PConnectionManager {
                     let chain = self.chain.clone();
                     let peer_manager = self.peer_manager.clone();
                     let local_node_nonce = self.local_node_nonce;
+                    let advertised_ip = self.advertised_ip.clone();
+                    let advertised_port = self.advertised_port;
+                    let allow_private = self.allow_private_peer_addresses;
                     tokio::spawn(async move {
-                        handle_inbound(stream, addr, chain, peer_manager, local_node_nonce).await;
+                        handle_inbound(
+                            stream,
+                            addr,
+                            chain,
+                            peer_manager,
+                            local_node_nonce,
+                            advertised_ip,
+                            advertised_port,
+                            allow_private,
+                        )
+                        .await;
                     });
                 }
                 Err(e) => {
@@ -166,6 +210,9 @@ async fn handle_inbound<S>(
     chain: Arc<Mutex<ChainState>>,
     peer_manager: Arc<PeerManager>,
     local_node_nonce: u64,
+    advertised_ip: Option<String>,
+    advertised_port: Option<u16>,
+    allow_private_peer_addresses: bool,
 ) where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
@@ -193,21 +240,38 @@ async fn handle_inbound<S>(
                         }
 
                         let our_height = chain.lock().await.current_height();
-                        let local_hs = HandshakeMessage::new(our_height, local_node_nonce);
+                        let local_hs = HandshakeMessage::new_with_advertised(
+                            our_height,
+                            local_node_nonce,
+                            advertised_ip.clone(),
+                            advertised_port,
+                        );
                         let validation = validate_handshake(&remote_hs, local_node_nonce);
 
                         match validation {
                             HandshakeResult::Accepted => {
-                                peer_manager.upsert(&addr.to_string(), false);
-                                peer_manager.set_state(&addr.to_string(), PeerState::Connected);
+                                let observed_addr = addr.to_string();
+                                let peer_key = match peer_manager.resolve_inbound_peer_key(
+                                    &observed_addr,
+                                    &remote_hs,
+                                    allow_private_peer_addresses,
+                                ) {
+                                    Ok(peer_key) => peer_key,
+                                    Err(reason) => {
+                                        let disconnect = P2PMessage::Disconnect { reason };
+                                        let _ = send_message(&mut stream, &disconnect).await;
+                                        break;
+                                    }
+                                };
+                                peer_manager.set_state(&peer_key, PeerState::Connected);
                                 peer_manager.note_peer_height(
-                                    &addr.to_string(),
+                                    &peer_key,
                                     remote_hs.chain_height,
                                     false,
                                 );
                                 tracing::info!(
                                     "[P2P] {} handshake complete local_height={} remote_height={}",
-                                    addr,
+                                    peer_key,
                                     our_height,
                                     remote_hs.chain_height
                                 );
@@ -509,6 +573,9 @@ mod tests {
             chain.clone(),
             peer_manager.clone(),
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let remote = HandshakeMessage::new(17, local_nonce + 1);
@@ -551,6 +618,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -585,6 +655,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -619,6 +692,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -653,6 +729,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -687,6 +766,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let mut remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -728,6 +810,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         let remote = HandshakeMessage::new(0, local_nonce);
@@ -761,6 +846,9 @@ mod tests {
             chain,
             peer_manager,
             local_nonce,
+            None,
+            None,
+            true,
         ));
 
         client.write_all(&4u32.to_be_bytes()).await.unwrap();

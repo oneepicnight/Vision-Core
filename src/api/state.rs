@@ -45,6 +45,11 @@ pub(crate) struct NodeStatusSnapshot {
     pub cached_state_root: Option<String>,
     pub mempool_size: usize,
     pub peer_count: usize,
+    pub durable_peer_count: usize,
+    pub active_inbound_sessions: usize,
+    pub active_outbound_sessions: usize,
+    pub transient_peer_count: usize,
+    pub dialable_peer_count: usize,
     pub mining: MiningStatusSnapshot,
     pub recovery: RecoveryStatusSnapshot,
 }
@@ -164,11 +169,21 @@ impl NodeApiState {
         };
 
         let mempool_size = self.mempool.len();
-        let peer_count = self
+        let (peer_count, durable_peer_count, active_inbound_sessions, active_outbound_sessions, transient_peer_count, dialable_peer_count) = self
             .peer_manager
             .as_ref()
-            .map(|peers| peers.connected_count())
-            .unwrap_or(0);
+            .map(|peers| {
+                let counts = peers.peer_counts();
+                (
+                    peers.connected_count(),
+                    counts.durable_peers,
+                    counts.active_inbound_sessions,
+                    counts.active_outbound_sessions,
+                    counts.transient_connections,
+                    counts.dialable_peers,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0, 0, 0));
         let recovery = self.recovery_state.snapshot();
         let mining = self
             .miner_manager
@@ -193,6 +208,11 @@ impl NodeApiState {
             cached_state_root,
             mempool_size,
             peer_count,
+            durable_peer_count,
+            active_inbound_sessions,
+            active_outbound_sessions,
+            transient_peer_count,
+            dialable_peer_count,
             mining,
             recovery,
         }
@@ -519,6 +539,11 @@ mod tests {
             cached_state_root: None,
             mempool_size: 0,
             peer_count: 0,
+            durable_peer_count: 0,
+            active_inbound_sessions: 0,
+            active_outbound_sessions: 0,
+            transient_peer_count: 0,
+            dialable_peer_count: 0,
             mining: MiningStatusSnapshot::unavailable(),
             recovery: crate::node::recovery::RecoveryState::new().snapshot(),
         };
@@ -527,7 +552,7 @@ mod tests {
         assert_eq!(
             json,
             format!(
-                "{{\"version\":\"{}\",\"canonical_tip_height\":0,\"canonical_tip_hash\":\"{}\",\"cached_state_root_height\":null,\"cached_state_root\":null,\"mempool_size\":0,\"peer_count\":0,\"mining\":{{\"available\":false,\"active\":false,\"blocks_found\":0,\"recovery_state\":\"normal\",\"paused_reason\":null}},\"recovery\":{{\"state\":\"normal\",\"peer_addr\":null,\"local_height\":null,\"local_work\":null,\"local_tip_hash\":null,\"remote_height\":null,\"remote_work\":null,\"remote_tip_hash\":null,\"reason\":null}}}}",
+                "{{\"version\":\"{}\",\"canonical_tip_height\":0,\"canonical_tip_hash\":\"{}\",\"cached_state_root_height\":null,\"cached_state_root\":null,\"mempool_size\":0,\"peer_count\":0,\"durable_peer_count\":0,\"active_inbound_sessions\":0,\"active_outbound_sessions\":0,\"transient_peer_count\":0,\"dialable_peer_count\":0,\"mining\":{{\"available\":false,\"active\":false,\"blocks_found\":0,\"recovery_state\":\"normal\",\"paused_reason\":null}},\"recovery\":{{\"state\":\"normal\",\"peer_addr\":null,\"local_height\":null,\"local_work\":null,\"local_tip_hash\":null,\"remote_height\":null,\"remote_work\":null,\"remote_tip_hash\":null,\"reason\":null}}}}",
                 crate::config::constants::NODE_VERSION,
                 "00".repeat(32),
             )

@@ -121,6 +121,17 @@ impl HandshakeMessage {
             seed_peers: vec![],
         }
     }
+    pub fn new_with_advertised(
+        chain_height: u64,
+        node_nonce: u64,
+        advertised_ip: Option<String>,
+        advertised_port: Option<u16>,
+    ) -> Self {
+        let mut handshake = Self::new(chain_height, node_nonce);
+        handshake.advertised_ip = advertised_ip;
+        handshake.advertised_port = advertised_port;
+        handshake
+    }
 }
 
 // â”€â”€â”€ Handshake validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -219,6 +230,19 @@ mod tests {
     fn new_sets_correct_protocol_version() {
         let hs = our_hs(0, 1);
         assert_eq!(hs.protocol_version, PROTOCOL_VERSION);
+    }
+
+
+    #[test]
+    fn new_with_advertised_sets_peer_identity_fields() {
+        let hs = HandshakeMessage::new_with_advertised(
+            10,
+            99,
+            Some("127.0.0.1".to_string()),
+            Some(7072),
+        );
+        assert_eq!(hs.advertised_ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(hs.advertised_port, Some(7072));
     }
 
     #[test]

@@ -13,6 +13,15 @@ pub struct Settings {
     /// P2P listen address.
     pub p2p_addr: String,
 
+    /// Optional advertised P2P host/IP used as this node's durable peer identity.
+    pub p2p_advertised_host: Option<String>,
+
+    /// Optional advertised P2P port used as this node's durable peer identity.
+    pub p2p_advertised_port: Option<u16>,
+
+    /// Whether loopback/private/link-local advertised peer addresses are accepted.
+    pub allow_private_peer_addresses: bool,
+
     /// Canonical reward recipient used by the miner.
     pub miner_address: String,
 
@@ -48,6 +57,14 @@ impl Default for Settings {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(DEFAULT_P2P_PORT)
             ),
+            p2p_advertised_host: parse_optional_string(std::env::var("VISION_P2P_ADVERTISED_HOST").ok()),
+            p2p_advertised_port: std::env::var("VISION_P2P_ADVERTISED_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .filter(|port| *port != 0),
+            allow_private_peer_addresses: std::env::var("VISION_ALLOW_PRIVATE_PEERS")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true),
             miner_address: parse_miner_address(std::env::var("VISION_MINER_ADDRESS").ok()),
             mining_enabled: std::env::var("VISION_MINING")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -70,6 +87,10 @@ impl Settings {
     pub fn from_env() -> Self {
         Self::default()
     }
+}
+
+fn parse_optional_string(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 fn parse_seed_peers(raw: Option<String>) -> Vec<String> {

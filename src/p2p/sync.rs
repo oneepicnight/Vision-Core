@@ -20,7 +20,7 @@ use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::PeerManager;
-use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeMessage, HandshakeResult};
+use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
 use crate::types::Block;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +137,7 @@ pub(crate) async fn live_sync_from_peer(
 
     send_message(
         &mut stream,
-        &P2PMessage::Handshake(HandshakeMessage::new(local_height, local_nonce)),
+        &P2PMessage::Handshake(conn_mgr.local_handshake(local_height)),
     )
     .await?;
     let remote_hs = match recv_message(&mut stream).await? {
@@ -420,6 +420,7 @@ pub async fn watchdog_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::p2p::protocol::HandshakeMessage;
     use crate::chain::accept::{apply_block, tests_helpers::make_test_block};
     use crate::p2p::peer_manager::PeerState;
     use tokio::time::{timeout, Duration};

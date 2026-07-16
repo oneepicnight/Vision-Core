@@ -14,7 +14,7 @@ use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
-use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeMessage, HandshakeResult};
+use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
 use crate::p2p::sync::SyncGuard;
 use crate::types::transaction::canonical_tx_id;
 
@@ -31,10 +31,13 @@ pub async fn start_services(
     settings: &Settings,
 ) -> Result<()> {
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
-    let conn_mgr = Arc::new(P2PConnectionManager::new(
+    let conn_mgr = Arc::new(P2PConnectionManager::new_with_advertised(
         p2p_addr,
         chain.clone(),
         peer_manager.clone(),
+        settings.p2p_advertised_host.clone(),
+        settings.p2p_advertised_port,
+        settings.allow_private_peer_addresses,
     ));
 
     {
@@ -217,7 +220,7 @@ async fn seed_peer_loop(
             Ok(mut stream) => {
                 let local_nonce = conn_mgr.local_node_nonce();
                 let local_height = chain.lock().await.current_height();
-                let local_hs = HandshakeMessage::new(local_height, local_nonce);
+                let local_hs = conn_mgr.local_handshake(local_height);
 
                 if let Err(e) = send_message(&mut stream, &P2PMessage::Handshake(local_hs)).await {
                     tracing::warn!("[P2P] {} handshake send error: {}", peer_addr, e);
