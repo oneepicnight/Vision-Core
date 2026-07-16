@@ -1,4 +1,4 @@
-use crate::config::constants::{NETWORK_ID, NODE_VERSION, PROTOCOL_VERSION};
+use crate::config::constants::{CONSENSUS_VERSION, NETWORK_ID, NODE_VERSION, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
 
 // â”€â”€â”€ Handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -68,7 +68,7 @@ pub struct HandshakeMessage {
     /// Network name string (e.g. `"mainnet"`).
     pub network_id: String,
 
-    /// Human-readable version tag for diagnostics only (e.g. `"v0.1.0"`).
+    /// Human-readable version tag for diagnostics only (e.g. `"v0.1.0-consensus-v1.0.3"`).
     pub node_tag: String,
 
     /// Economics fingerprint â€” must match `ECON_HASH` on all nodes to prevent
@@ -113,7 +113,7 @@ impl HandshakeMessage {
             node_nonce,
             chain_height,
             network_id: NETWORK_ID.to_string(),
-            node_tag: NODE_VERSION.to_string(),
+            node_tag: format!("{}-consensus-v1.0.{}", NODE_VERSION, CONSENSUS_VERSION),
             econ_hash: ECON_HASH.to_string(),
             pow_params_hash: VISIONX_PARAMS.fingerprint(),
             advertised_ip: None,
@@ -222,6 +222,11 @@ mod tests {
     }
 
     #[test]
+    fn new_sets_consensus_version_in_node_tag() {
+        let hs = our_hs(0, 1);
+        assert!(hs.node_tag.contains("consensus-v1.0.3"));
+    }
+    #[test]
     fn new_sets_correct_network_id() {
         let hs = our_hs(0, 1);
         assert_eq!(hs.network_id, NETWORK_ID);
@@ -289,6 +294,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn v1_0_2_protocol_peer_is_rejected() {
+        let mut peer = our_hs(0, 2);
+        peer.protocol_version = 3;
+        assert_eq!(
+            validate_handshake(&peer, 1),
+            HandshakeResult::VersionMismatch {
+                remote: 3,
+                ours: PROTOCOL_VERSION,
+            }
+        );
+    }
     #[test]
     fn wrong_chain_id_rejected() {
         let mut peer = our_hs(0, 2);

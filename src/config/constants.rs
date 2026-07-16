@@ -18,7 +18,14 @@ pub const NODE_VERSION: &str = "v0.1.0";
 
 /// [CONSENSUS] Wire protocol version. Peers that send a different value are
 /// rejected immediately during handshake.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// Version 4 gates the v1.0.3 Alpha/Testnet fork-choice semantics. It is not
+/// compatible with v1.0.2 peers, which may reject deep higher-work reorgs.
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// [CONSENSUS] Fork-choice/consensus compatibility version advertised through
+/// the P2P protocol version for v1.0.3.
+pub const CONSENSUS_VERSION: u32 = 3;
 
 /// [CONSENSUS] Block-header encoding scheme version. Embedded as the first 4
 /// bytes of every `BlockHeader::canonical_bytes()` call and therefore part of
@@ -81,17 +88,20 @@ pub const LWMA_MAX_INTERVAL_SECS: u64 = TARGET_BLOCK_TIME * 6; // 180 s
 /// the local wall clock are rejected as too far in the future.
 pub const MAX_FUTURE_TIMESTAMP_SECS: u64 = 7_200; // 2 hours
 
-/// [CONSENSUS] Maximum blocks a normal-operation reorg may roll back.
-/// Forks deeper than this are not processed.
+/// [POLICY] Historical v1.0.2 reorg depth limit.
+///
+/// v1.0.3 fork choice no longer treats this as canonical validity. A fully
+/// validated branch with strictly greater cumulative work is eligible to win
+/// regardless of depth. Runtime resource limits must pause/delay recovery,
+/// not silently redefine consensus validity.
 pub const MAX_REORG: u64 = 36;
 
-/// [CONSENSUS] Extended reorg limit used only during initial bootstrap sync
-/// when the local chain is known to be incomplete.
+/// [POLICY] Historical bootstrap replay budget. This is not a replacement
+/// fork-choice cap in v1.0.3.
 pub const MAX_REORG_BOOTSTRAP: u64 = 2_048;
 
-/// [CONSENSUS] Blocks older than this depth are treated as final; no reorg
-/// that would remove them is accepted.
-/// NOTE: must be > MAX_REORG to avoid a deadlock zone (H-1 from audit).
+/// [POLICY] Historical finality depth retained for diagnostics until explicit
+/// deterministic checkpoint/finality semantics are specified.
 pub const FINALITY_DEPTH: u64 = 50;
 
 /// [CONSENSUS] Maximum serialised weight units allowed per block.
@@ -279,15 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn finality_depth_exceeds_max_reorg() {
-        // If finality overlaps with the rollback limit, forks at that depth
-        // create an unrecoverable deadlock zone (audit issue H-1).
-        assert!(
-            FINALITY_DEPTH > MAX_REORG,
-            "FINALITY_DEPTH ({}) must exceed MAX_REORG ({}) to avoid deadlock zone",
-            FINALITY_DEPTH,
-            MAX_REORG
-        );
+    fn historical_reorg_depth_constants_are_diagnostic_only() {
+        assert!(MAX_REORG > 0);
+        assert!(MAX_REORG_BOOTSTRAP >= MAX_REORG);
+        assert!(FINALITY_DEPTH > 0);
     }
 
     #[test]

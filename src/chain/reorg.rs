@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 
 use crate::chain::accept::apply_coinbase_reward;
-use crate::chain::ChainState;
-use crate::config::constants::MAX_REORG;
-use crate::types::{Block, Tx};
 use crate::chain::state_root::compute_state_root;
-use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionError, TxExecutionState};
+use crate::chain::ChainState;
+use crate::types::transaction::{
+    canonical_tx_id, simulate_tx_execution, TxExecutionError, TxExecutionState,
+};
+use crate::types::{Block, Tx};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReorgRecovery {
@@ -54,13 +55,19 @@ fn collect_new_segment(g: &ChainState, tip_hash: &str) -> Vec<Block> {
 /// The function walks backwards through `g.side_blocks` from `new_tip` to
 /// find the common ancestor with the current canonical chain, then:
 ///
-/// 1. Checks that the reorg depth <= `MAX_REORG` (protects finalised blocks).
-/// 2. Demotes canonical blocks above the common ancestor to `side_blocks`.
-/// 3. Promotes the new segment from `side_blocks` to canonical.
-/// 4. Rebuilds `canon_index` and `cumulative_work` across the affected range.
+/// 1. Locates the common canonical ancestor.
+/// 2. Replays the candidate branch from that ancestor with normal transaction,
+///    reward, and state-root validation.
+/// 3. Demotes canonical blocks above the common ancestor to `side_blocks`.
+/// 4. Promotes the new segment from `side_blocks` to canonical.
+/// 5. Rebuilds `canon_index` and `cumulative_work` across the affected range.
 ///
-/// Returns `true` if the canonical tip changed; `false` if the reorg was
-/// rejected (depth too large, broken ancestry, or common ancestor not found).
+/// v1.0.3 does not reject a branch solely because the common ancestor is deep.
+/// Fork-choice eligibility is determined by validated cumulative work before
+/// this function is called; this function validates and performs the swap.
+///
+/// Returns recovery metadata if the canonical tip changed; returns `None` if
+/// ancestry or replay validation fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SideStateReconstructionError {
     BrokenAncestry {
@@ -153,7 +160,10 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> Option<ReorgRecovery> {
     // --- 1. Trace the new chain segment back to a canonical ancestor ---
     let new_segment = collect_new_segment(g, new_tip_hash);
     if new_segment.is_empty() {
-        tracing::debug!("[REORG] aborted: cannot trace ancestry of {:.8}", new_tip_hash);
+        tracing::debug!(
+            "[REORG] aborted: cannot trace ancestry of {:.8}",
+            new_tip_hash
+        );
         return None;
     }
 
@@ -162,25 +172,23 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> Option<ReorgRecovery> {
     let &common_height = match g.canon_index.get(common_hash.as_str()) {
         Some(h) => h,
         None => {
-            tracing::debug!("[REORG] aborted: common ancestor {:.8} not canonical", common_hash);
+            tracing::debug!(
+                "[REORG] aborted: common ancestor {:.8} not canonical",
+                common_hash
+            );
             return None;
         }
     };
 
-    // --- 3. Depth guard ---
     let reorg_depth = g.current_height().saturating_sub(common_height);
-    if reorg_depth > MAX_REORG {
-        tracing::warn!(
-            "[REORG] rejected: depth {} exceeds MAX_REORG {}",
-            reorg_depth, MAX_REORG
-        );
-        return None;
-    }
 
     let ancestor_state = match reconstruct_canonical_state_at_height(g, common_height) {
         Ok(state) => state,
         Err(reason) => {
-            tracing::debug!("[REORG] aborted: ancestor replay validation failed: {:?}", reason);
+            tracing::debug!(
+                "[REORG] aborted: ancestor replay validation failed: {:?}",
+                reason
+            );
             return None;
         }
     };
@@ -188,12 +196,16 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> Option<ReorgRecovery> {
     let replay_state = match reconstruct_branch_state(common_hash, &ancestor_state, &new_segment) {
         Ok(state) => state,
         Err(reason) => {
-            tracing::debug!("[REORG] aborted: branch replay validation failed: {:?}", reason);
+            tracing::debug!(
+                "[REORG] aborted: branch replay validation failed: {:?}",
+                reason
+            );
             return None;
         }
     };
 
-    let computed_state_root = match compute_state_root(&replay_state.balances, &replay_state.nonces) {
+    let computed_state_root = match compute_state_root(&replay_state.balances, &replay_state.nonces)
+    {
         Ok(root) => root,
         Err(_) => {
             tracing::debug!("[REORG] aborted: replay state root construction failed");
@@ -250,11 +262,8 @@ pub fn try_reorg(g: &mut ChainState, new_tip: &Block) -> Option<ReorgRecovery> {
     }
 
     let old_tip_height = g.current_height();
-    if let Err(err) = crate::chain::storage::persist_canonical_reorg(
-        g,
-        &new_blocks,
-        old_tip_height,
-    ) {
+    if let Err(err) = crate::chain::storage::persist_canonical_reorg(g, &new_blocks, old_tip_height)
+    {
         tracing::error!("[REORG] aborted: canonical persistence failed: {}", err);
         return None;
     }
@@ -305,18 +314,17 @@ pub fn cumulative_work(g: &ChainState, block_hash: &str) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::accept::{apply_block, AcceptResult};
     use crate::chain::accept::tests_helpers::make_test_block;
+    use crate::chain::accept::{apply_block, AcceptResult};
     use crate::chain::state::ChainState;
-    use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
-    use crate::genesis::genesis_block;
     use crate::chain::state_root::compute_state_root;
     use crate::chain::storage::load_height_index;
+    use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
+    use crate::genesis::genesis_block;
     use crate::pow::visionx::historical_block_digest;
     use crate::pow::VISIONX_PARAMS;
     use crate::types::transaction::{
-        canonical_unsigned_payload, CashTransferArgs, MIN_CASH_TRANSFER_FEE_LIMIT,
-        TxExecutionState,
+        canonical_unsigned_payload, CashTransferArgs, TxExecutionState, MIN_CASH_TRANSFER_FEE_LIMIT,
     };
     use crate::types::Tx;
     use ed25519_dalek::{Signer, SigningKey};
@@ -423,10 +431,8 @@ mod tests {
     ) -> Block {
         let mut blk = make_test_block(parent_hash, height, timestamp, slot);
         blk.txs.extend(extra_txs);
-        let mut exec_state = TxExecutionState::from_balances_and_nonces(
-            balances.clone(),
-            nonces.clone(),
-        );
+        let mut exec_state =
+            TxExecutionState::from_balances_and_nonces(balances.clone(), nonces.clone());
         for tx in blk.txs.iter().skip(1) {
             crate::types::transaction::simulate_tx_execution(&mut exec_state, tx).ok();
         }
@@ -446,7 +452,15 @@ mod tests {
         balances: &std::collections::BTreeMap<String, u128>,
         nonces: &std::collections::BTreeMap<String, u64>,
     ) -> Block {
-        branch_block(parent_hash, height, timestamp, slot, Vec::new(), balances, nonces)
+        branch_block(
+            parent_hash,
+            height,
+            timestamp,
+            slot,
+            Vec::new(),
+            balances,
+            nonces,
+        )
     }
 
     /// Build a short canonical chain of `n` blocks on top of genesis.
@@ -462,10 +476,8 @@ mod tests {
     ) -> Block {
         let mut blk = make_test_block(parent_hash, height, timestamp, slot);
         blk.header.miner = miner.to_string();
-        let mut state = TxExecutionState::from_balances_and_nonces(
-            balances.clone(),
-            nonces.clone(),
-        );
+        let mut state =
+            TxExecutionState::from_balances_and_nonces(balances.clone(), nonces.clone());
         apply_coinbase_reward(&mut state, miner, height).unwrap();
         blk.header.state_root = compute_state_root(&state.balances, &state.nonces).unwrap();
         rehash_block(&mut blk);
@@ -477,7 +489,7 @@ mod tests {
         apply_block(&mut g, &gen, None);
         let mut blocks = vec![gen.clone()];
         let mut prev = gen.hash().to_string();
-        let mut ts   = gen.header.timestamp;
+        let mut ts = gen.header.timestamp;
         for i in 1..=n {
             ts += TARGET_BLOCK_TIME;
             let blk = make_test_block(&prev, i, ts, (0xA0 + i) as u8);
@@ -485,6 +497,38 @@ mod tests {
             prev = blk.hash().to_string();
             blocks.push(blk);
         }
+        (g, blocks)
+    }
+    fn build_synthetic_indexed_chain(n: u64) -> (ChainState, Vec<Block>) {
+        let mut g = temp_state();
+        let gen = genesis_block();
+        let mut blocks = vec![gen.clone()];
+        let mut prev = gen.hash().to_string();
+        let mut ts = gen.header.timestamp;
+        let mut cw = 0u128;
+
+        for block in [&gen] {
+            let hash = block.hash().to_string();
+            cw += block.header.difficulty as u128;
+            g.canon_index.insert(hash.clone(), block.header.number);
+            g.cumulative_work.insert(hash.clone(), cw);
+            g.seen_blocks.insert(hash);
+            g.blocks.push(block.clone());
+        }
+
+        for height in 1..=n {
+            ts += TARGET_BLOCK_TIME;
+            let block = make_test_block(&prev, height, ts, (0xA0u8).wrapping_add(height as u8));
+            let hash = block.hash().to_string();
+            cw += block.header.difficulty as u128;
+            g.canon_index.insert(hash.clone(), height);
+            g.cumulative_work.insert(hash.clone(), cw);
+            g.seen_blocks.insert(hash.clone());
+            g.blocks.push(block.clone());
+            prev = hash;
+            blocks.push(block);
+        }
+
         (g, blocks)
     }
 
@@ -619,12 +663,9 @@ mod tests {
             &[branch_1.clone(), branch_2.clone()],
         )
         .expect("reconstruction should succeed");
-        let reconstructed_2 = reconstruct_branch_state(
-            ancestor.hash(),
-            &ancestor_state,
-            &[branch_1, branch_2],
-        )
-        .expect("reconstruction should succeed");
+        let reconstructed_2 =
+            reconstruct_branch_state(ancestor.hash(), &ancestor_state, &[branch_1, branch_2])
+                .expect("reconstruction should succeed");
 
         assert_eq!(reconstructed_1, reconstructed_2);
     }
@@ -678,12 +719,9 @@ mod tests {
             &[branch_1.clone(), branch_2.clone()],
         )
         .expect("reconstruction should succeed");
-        let reconstructed_2 = reconstruct_branch_state(
-            ancestor.hash(),
-            &ancestor_state,
-            &[branch_1, branch_2],
-        )
-        .expect("reconstruction should succeed");
+        let reconstructed_2 =
+            reconstruct_branch_state(ancestor.hash(), &ancestor_state, &[branch_1, branch_2])
+                .expect("reconstruction should succeed");
 
         assert_eq!(reconstructed_1, reconstructed_2);
     }
@@ -733,12 +771,8 @@ mod tests {
             &branch_1_state.nonces,
         );
 
-        let _ = reconstruct_branch_state(
-            ancestor.hash(),
-            &ancestor_state,
-            &[branch_1, branch_2],
-        )
-        .expect("reconstruction should succeed");
+        let _ = reconstruct_branch_state(ancestor.hash(), &ancestor_state, &[branch_1, branch_2])
+            .expect("reconstruction should succeed");
 
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
@@ -779,11 +813,7 @@ mod tests {
             &g.nonces,
         );
 
-        let result = reconstruct_branch_state(
-            ancestor.hash(),
-            &ancestor_state,
-            &[bad_branch],
-        );
+        let result = reconstruct_branch_state(ancestor.hash(), &ancestor_state, &[bad_branch]);
 
         assert!(matches!(
             result,
@@ -822,7 +852,13 @@ mod tests {
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
 
         let canonical = reward_only_block(
-            gen.hash(), 1, ts, 0xAA, &miner_a, &empty_balances, &empty_nonces,
+            gen.hash(),
+            1,
+            ts,
+            0xAA,
+            &miner_a,
+            &empty_balances,
+            &empty_nonces,
         );
         assert_eq!(
             apply_block(&mut g, &canonical, None),
@@ -831,16 +867,20 @@ mod tests {
         assert_eq!(g.balance_of(&miner_a), crate::miner::block_reward(1));
 
         let side_1 = reward_only_block(
-            gen.hash(), 1, ts, 0xAB, &miner_b, &empty_balances, &empty_nonces,
+            gen.hash(),
+            1,
+            ts,
+            0xAB,
+            &miner_b,
+            &empty_balances,
+            &empty_nonces,
         );
         assert_eq!(
             apply_block(&mut g, &side_1, None),
             AcceptResult::SideChain { height: 1 },
         );
-        let side_parent_balances = std::collections::BTreeMap::from([(
-            miner_b.clone(),
-            crate::miner::block_reward(1),
-        )]);
+        let side_parent_balances =
+            std::collections::BTreeMap::from([(miner_b.clone(), crate::miner::block_reward(1))]);
         let side_2 = reward_only_block(
             side_1.hash(),
             2,
@@ -860,9 +900,18 @@ mod tests {
             g.balance_of(&miner_b),
             crate::miner::block_reward(1) + crate::miner::block_reward(2),
         );
-        assert_eq!(load_height_index(&g, 0).unwrap().as_deref(), Some(gen.hash()));
-        assert_eq!(load_height_index(&g, 1).unwrap().as_deref(), Some(side_1.hash()));
-        assert_eq!(load_height_index(&g, 2).unwrap().as_deref(), Some(side_2.hash()));
+        assert_eq!(
+            load_height_index(&g, 0).unwrap().as_deref(),
+            Some(gen.hash())
+        );
+        assert_eq!(
+            load_height_index(&g, 1).unwrap().as_deref(),
+            Some(side_1.hash())
+        );
+        assert_eq!(
+            load_height_index(&g, 2).unwrap().as_deref(),
+            Some(side_2.hash())
+        );
     }
     #[test]
     fn reorg_switches_to_heavier_chain() {
@@ -888,8 +937,8 @@ mod tests {
         let b2p = make_test_block(b1p.hash(), 2, ts2, 0xCC);
         // Manually insert b2p as side block so try_reorg can find its ancestry.
         g.side_blocks.insert(b2p.hash().to_string(), b2p.clone());
-        let b2p_cw = g.cumulative_work.get(b1p.hash()).copied().unwrap_or(0)
-            + b2p.header.difficulty as u128;
+        let b2p_cw =
+            g.cumulative_work.get(b1p.hash()).copied().unwrap_or(0) + b2p.header.difficulty as u128;
         g.cumulative_work.insert(b2p.hash().to_string(), b2p_cw);
         g.seen_blocks.insert(b2p.hash().to_string());
 
@@ -909,14 +958,20 @@ mod tests {
             assert_eq!(g.current_height(), 2);
             assert_eq!(
                 canonical_block_hashes(&g),
-                vec![gen.hash().to_string(), b1p.hash().to_string(), b2p.hash().to_string()]
+                vec![
+                    gen.hash().to_string(),
+                    b1p.hash().to_string(),
+                    b2p.hash().to_string()
+                ]
             );
-            let expected_reward = crate::miner::block_reward(1)
-                + crate::miner::block_reward(2);
+            let expected_reward = crate::miner::block_reward(1) + crate::miner::block_reward(2);
             assert_eq!(g.balance_of(&"0".repeat(64)), expected_reward);
             assert_ne!(g.balances, before_balances);
             assert_eq!(g.nonces, before_nonces);
-            assert_eq!(before_blocks, vec![gen.hash().to_string(), b1.hash().to_string()]);
+            assert_eq!(
+                before_blocks,
+                vec![gen.hash().to_string(), b1.hash().to_string()]
+            );
             assert_eq!(before_cached_root, None);
             assert_eq!(
                 cached_state_root(&g),
@@ -925,24 +980,126 @@ mod tests {
         }
     }
     #[test]
-    fn reorg_respects_max_reorg_depth() {
-        // Build a chain of MAX_REORG + 2 blocks.
-        let depth = (MAX_REORG + 2) as u64;
-        let (mut g, blocks) = build_chain(depth);
-
-        // Fabricate a side block at height 1 (would require depth > MAX_REORG reorg).
+    fn depth_37_higher_work_reorg_is_not_rejected_by_depth() {
+        let depth = 37u64;
+        let (mut g, blocks) = build_synthetic_indexed_chain(depth);
+        let old_tip = g.tip_hash();
+        let old_work = g.cumulative_work.get(old_tip.as_str()).copied().unwrap();
         let fork_parent = blocks[0].hash().to_string();
         let fork_ts = blocks[0].header.timestamp + TARGET_BLOCK_TIME;
-        let fork_tip = make_test_block(&fork_parent, 1, fork_ts, 0xFF);
-        g.side_blocks.insert(fork_tip.hash().to_string(), fork_tip.clone());
-        g.cumulative_work.insert(
-            fork_tip.hash().to_string(),
-            (depth + 100) as u128, // artificially higher cw
-        );
-        g.seen_blocks.insert(fork_tip.hash().to_string());
+        let fork_1 = make_test_block(&fork_parent, 1, fork_ts, 0xE1);
+        let mut fork_2 = make_test_block(fork_1.hash(), 2, fork_ts + TARGET_BLOCK_TIME, 0xE2);
+        fork_2.header.difficulty = (depth + 100) as u64;
+        g.side_blocks
+            .insert(fork_1.hash().to_string(), fork_1.clone());
+        g.side_blocks
+            .insert(fork_2.hash().to_string(), fork_2.clone());
+        g.cumulative_work
+            .insert(fork_1.hash().to_string(), (depth + 100) as u128);
+        g.cumulative_work
+            .insert(fork_2.hash().to_string(), (depth + 101) as u128);
+        g.seen_blocks.insert(fork_1.hash().to_string());
+        g.seen_blocks.insert(fork_2.hash().to_string());
 
-        let reorged = try_reorg(&mut g, &fork_tip);
-        assert!(reorged.is_none(), "reorg deeper than MAX_REORG must be rejected");
+        let reorged = try_reorg(&mut g, &fork_2);
+        assert!(
+            reorged.is_some(),
+            "depth-37 higher-work reorg should be depth-eligible"
+        );
+        assert_eq!(g.tip_hash(), fork_2.hash());
+        assert!(
+            g.cumulative_work
+                .get(g.tip_hash().as_str())
+                .copied()
+                .unwrap()
+                > old_work
+        );
+        assert_ne!(g.tip_hash(), old_tip);
+    }
+
+    #[test]
+    fn equal_work_branch_preserves_existing_tip() {
+        let depth = 5u64;
+        let (mut g, canonical) = build_chain(depth);
+        let genesis = canonical[0].clone();
+        let old_tip = g.tip_hash();
+        let old_blocks = canonical_block_hashes(&g);
+        let old_work = g.cumulative_work.get(old_tip.as_str()).copied().unwrap();
+
+        let mut parent = genesis.hash().to_string();
+        let mut last_result = None;
+        for height in 1..=depth {
+            let timestamp = genesis.header.timestamp + TARGET_BLOCK_TIME * height;
+            let block = make_test_block(&parent, height, timestamp, (0x70 + height) as u8);
+            last_result = Some(apply_block(&mut g, &block, None));
+            parent = block.hash().to_string();
+        }
+
+        assert_eq!(last_result, Some(AcceptResult::SideChain { height: depth }));
+        assert_eq!(g.tip_hash(), old_tip);
+        assert_eq!(canonical_block_hashes(&g), old_blocks);
+        assert_eq!(
+            g.cumulative_work.get(old_tip.as_str()).copied().unwrap(),
+            old_work
+        );
+    }
+    #[test]
+    fn deep_higher_work_reorg_is_not_rejected_by_depth() {
+        let depth = 100u64;
+        let (mut g, blocks) = build_synthetic_indexed_chain(depth);
+        let old_tip = g.tip_hash();
+        let old_height = g.current_height();
+        let old_work = g.cumulative_work.get(old_tip.as_str()).copied().unwrap();
+        let fork_parent = blocks[0].hash().to_string();
+        let fork_ts = blocks[0].header.timestamp + TARGET_BLOCK_TIME;
+        let fork_1 = make_test_block(&fork_parent, 1, fork_ts, 0xEF);
+        let mut fork_2 = make_test_block(fork_1.hash(), 2, fork_ts + TARGET_BLOCK_TIME, 0xEE);
+        fork_2.header.difficulty = (depth + 100) as u64;
+        g.side_blocks
+            .insert(fork_1.hash().to_string(), fork_1.clone());
+        g.side_blocks
+            .insert(fork_2.hash().to_string(), fork_2.clone());
+        g.cumulative_work
+            .insert(fork_1.hash().to_string(), (depth + 100) as u128);
+        g.cumulative_work
+            .insert(fork_2.hash().to_string(), (depth + 101) as u128);
+        g.seen_blocks.insert(fork_1.hash().to_string());
+        g.seen_blocks.insert(fork_2.hash().to_string());
+
+        let reorged = try_reorg(&mut g, &fork_2);
+        assert!(
+            reorged.is_some(),
+            "deep higher-work reorg should be depth-eligible"
+        );
+        assert_eq!(g.tip_hash(), fork_2.hash());
+        assert_eq!(g.current_height(), 2);
+        assert_ne!(g.tip_hash(), old_tip);
+        assert!(
+            old_height > g.current_height(),
+            "canonical height may decrease while work increases"
+        );
+        let new_work = g
+            .cumulative_work
+            .get(g.tip_hash().as_str())
+            .copied()
+            .unwrap();
+        assert!(new_work > old_work);
+        assert_eq!(
+            load_height_index(&g, 0).unwrap().as_deref(),
+            Some(blocks[0].hash())
+        );
+        assert_eq!(
+            load_height_index(&g, 1).unwrap().as_deref(),
+            Some(fork_1.hash())
+        );
+        assert_eq!(
+            load_height_index(&g, 2).unwrap().as_deref(),
+            Some(fork_2.hash())
+        );
+        assert!(
+            load_height_index(&g, 3).unwrap().is_none(),
+            "stale height indexes above shorter tip are removed"
+        );
     }
 
     #[test]
@@ -953,7 +1110,8 @@ mod tests {
         // A block that points to an unknown parent -- ancestry chain broken.
         let unknown_parent = "dead".repeat(16);
         let orphan = make_test_block(&unknown_parent, 99, tip.header.timestamp + 30, 0xDD);
-        g.side_blocks.insert(orphan.hash().to_string(), orphan.clone());
+        g.side_blocks
+            .insert(orphan.hash().to_string(), orphan.clone());
 
         let result = try_reorg(&mut g, &orphan);
         assert!(result.is_none(), "reorg with broken ancestry must fail");
@@ -996,11 +1154,16 @@ mod tests {
         side2.txs[1].nonce = 1;
         rehash_block(&mut side2);
 
-        g.side_blocks.insert(side1.hash().to_string(), side1.clone());
-        g.side_blocks.insert(side2.hash().to_string(), side2.clone());
+        g.side_blocks
+            .insert(side1.hash().to_string(), side1.clone());
+        g.side_blocks
+            .insert(side2.hash().to_string(), side2.clone());
 
         let reorged = try_reorg(&mut g, &side2);
-        assert!(reorged.is_none(), "reorg must reject invalid replay transaction");
+        assert!(
+            reorged.is_none(),
+            "reorg must reject invalid replay transaction"
+        );
         assert_eq!(g.tip_hash(), before_tip);
         assert_eq!(canonical_block_hashes(&g), before_blocks);
         assert_eq!(g.canon_index, before_canon_index);
@@ -1039,11 +1202,16 @@ mod tests {
         side2.header.state_root = "11".repeat(32);
         rehash_block(&mut side2);
 
-        g.side_blocks.insert(side1.hash().to_string(), side1.clone());
-        g.side_blocks.insert(side2.hash().to_string(), side2.clone());
+        g.side_blocks
+            .insert(side1.hash().to_string(), side1.clone());
+        g.side_blocks
+            .insert(side2.hash().to_string(), side2.clone());
 
         let reorged = try_reorg(&mut g, &side2);
-        assert!(reorged.is_none(), "reorg must reject invalid replay state root");
+        assert!(
+            reorged.is_none(),
+            "reorg must reject invalid replay state root"
+        );
         assert_eq!(g.tip_hash(), before_tip);
         assert_eq!(canonical_block_hashes(&g), before_blocks);
         assert_eq!(g.canon_index, before_canon_index);
@@ -1080,16 +1248,23 @@ mod tests {
             g.side_blocks.insert(blk.hash().to_string(), blk.clone());
             g.cumulative_work.insert(blk.hash().to_string(), cw);
             g.seen_blocks.insert(blk.hash().to_string());
-
         }
         let reorged = try_reorg(&mut g, &c3);
         assert!(reorged.is_some(), "should reorg to longer chain");
         assert_eq!(g.tip_hash(), c3.hash());
         assert_eq!(
             canonical_block_hashes(&g),
-            vec![gen.hash().to_string(), c1.hash().to_string(), c2.hash().to_string(), c3.hash().to_string()]
+            vec![
+                gen.hash().to_string(),
+                c1.hash().to_string(),
+                c2.hash().to_string(),
+                c3.hash().to_string()
+            ]
         );
-        assert_eq!(cached_state_root(&g), Some((g.current_height(), canonical_state_root(&g))));
+        assert_eq!(
+            cached_state_root(&g),
+            Some((g.current_height(), canonical_state_root(&g)))
+        );
         // Original canonical blocks b1, b2 should now be side blocks.
         assert!(g.side_blocks.contains_key(b1.hash()));
         assert!(g.side_blocks.contains_key(b2.hash()));
