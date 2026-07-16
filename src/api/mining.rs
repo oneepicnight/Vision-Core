@@ -10,6 +10,9 @@ pub struct MiningInfoResponse {
     pub height: u64,
     pub difficulty: u64,
     pub epoch: u64,
+    pub active: bool,
+    pub recovery_state: &'static str,
+    pub paused_reason: Option<String>,
     pub hash_rate_estimate: Option<f64>,
 }
 
@@ -53,9 +56,32 @@ mod tests {
         assert_eq!(snapshot.height, 0);
         assert_eq!(snapshot.difficulty, 7);
         assert_eq!(snapshot.epoch, 0);
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.recovery_state, "normal");
+        assert_eq!(snapshot.paused_reason, None);
         assert_eq!(snapshot.hash_rate_estimate, None);
     }
 
+    #[tokio::test]
+    async fn mining_info_reports_higher_work_recovery_pause() {
+        let chain = Arc::new(Mutex::new(temp_state()));
+        let recovery = Arc::new(crate::node::recovery::RecoveryState::new());
+        recovery.begin_higher_work_recovery(
+            "127.0.0.1:9009",
+            crate::p2p::protocol::ChainSummary::new(1, Some("local".to_string()), 1),
+            crate::p2p::protocol::ChainSummary::new(2, Some("remote".to_string()), 2),
+        );
+        let state = NodeApiState::new(chain, Arc::new(Mempool::new()))
+            .with_miner_manager(Arc::new(MinerManager::new(VisionXParams::default())))
+            .with_recovery_state(recovery);
+
+        let snapshot = state.mining_info_snapshot().await;
+
+        assert!(snapshot.enabled);
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.recovery_state, "higher_work_recovery");
+        assert!(snapshot.paused_reason.is_some());
+    }
     #[tokio::test]
     async fn mining_info_endpoint_matches_snapshot() {
         let chain = Arc::new(Mutex::new(temp_state()));
@@ -68,6 +94,9 @@ mod tests {
         assert_eq!(response.height, expected.height);
         assert_eq!(response.difficulty, expected.difficulty);
         assert_eq!(response.epoch, expected.epoch);
+        assert_eq!(response.active, expected.active);
+        assert_eq!(response.recovery_state, expected.recovery_state);
+        assert_eq!(response.paused_reason, expected.paused_reason);
         assert_eq!(response.hash_rate_estimate, expected.hash_rate_estimate);
     }
 }

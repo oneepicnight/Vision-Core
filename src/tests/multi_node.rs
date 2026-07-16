@@ -374,7 +374,8 @@ mod tests {
                 &node.chain,
                 node.peer_manager.as_ref(),
                 &mut guard,
-            None,
+                None,
+                None,
             ),
         )
         .await
@@ -602,7 +603,8 @@ mod tests {
                 &follower.chain,
                 follower.peer_manager.as_ref(),
                 &mut guard,
-            None,
+                None,
+                None,
             ),
         )
         .await

@@ -16,6 +16,7 @@ use crate::config::constants::{
 };
 use crate::genesis::genesis_block;
 use crate::mempool::Mempool;
+use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::PeerManager;
@@ -317,6 +318,7 @@ pub async fn watchdog_step(
     peer_manager: &PeerManager,
     guard: &mut SyncGuard,
     mempool: Option<&Mempool>,
+    recovery_state: Option<&RecoveryState>,
 ) -> Result<()> {
     if guard.is_blocked() {
         tracing::trace!("[SYNC] watchdog skipped (sync in progress or throttled)");
@@ -367,11 +369,48 @@ pub async fn watchdog_step(
                 remote_work,
                 local_summary.height
             );
+            let remote_summary = peer_manager.peer_summary(&peer_addr);
+            if let (Some(recovery_state), Some(remote_summary)) =
+                (recovery_state, remote_summary.clone())
+            {
+                recovery_state.begin_higher_work_recovery(
+                    &peer_addr,
+                    local_summary.clone(),
+                    remote_summary,
+                );
+            }
             guard.mark_started();
             let result =
                 live_sync_from_peer(conn_mgr, chain, peer_manager, &peer_addr, mempool).await;
             guard.mark_done();
-            result?;
+            match result {
+                Ok(_) => {
+                    if let Some(recovery_state) = recovery_state {
+                        let after = {
+                            let g = chain.lock().await;
+                            ChainSummary::from_chain(&g)
+                        };
+                        if after.cumulative_work >= remote_work {
+                            recovery_state.clear("higher-work branch adopted or no longer ahead");
+                        } else {
+                            recovery_state
+                                .mark_limited("higher-work recovery incomplete after sync batch");
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Some(recovery_state) = recovery_state {
+                        let reason = err.to_string();
+                        if reason.contains("sync import rejected") {
+                            recovery_state.clear("advertised branch was locally rejected");
+                        } else {
+                            recovery_state
+                                .mark_high_risk(format!("higher-work recovery failed: {}", reason));
+                        }
+                    }
+                    return Err(err);
+                }
+            }
         }
     }
 
@@ -683,7 +722,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap()
@@ -719,7 +758,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -755,7 +794,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -790,7 +829,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -826,7 +865,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -862,7 +901,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -902,7 +941,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -938,7 +977,7 @@ mod tests {
         let mut guard = SyncGuard::new();
         let result = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -983,7 +1022,7 @@ mod tests {
 
         let first = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -995,7 +1034,7 @@ mod tests {
 
         let second = timeout(
             Duration::from_secs(5),
-            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None),
+            watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None),
         )
         .await
         .unwrap();
@@ -1010,6 +1049,54 @@ mod tests {
         valid_task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn watchdog_marks_high_risk_when_higher_work_recovery_is_unavailable() {
+        let mut chain_state = temp_state();
+        let gen = genesis_block();
+        assert!(matches!(
+            apply_block(&mut chain_state, &gen, None),
+            AcceptResult::CanonExtension { height: 0 }
+        ));
+        let chain = Arc::new(Mutex::new(chain_state));
+        let pm = Arc::new(PeerManager::new());
+        let peer = "127.0.0.1:9";
+        pm.upsert(peer, true);
+        pm.set_state(peer, PeerState::Connected);
+        pm.note_peer_summary(
+            peer,
+            ChainSummary::new(1, Some("ff".repeat(32)), 100),
+            false,
+        );
+        let conn_mgr = P2PConnectionManager::new(
+            "127.0.0.1:19112".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        );
+        let recovery = RecoveryState::new();
+        let mut guard = SyncGuard::new();
+
+        let result = timeout(
+            Duration::from_secs(5),
+            watchdog_step(
+                &conn_mgr,
+                &chain,
+                pm.as_ref(),
+                &mut guard,
+                None,
+                Some(&recovery),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            recovery.mode(),
+            crate::node::recovery::RecoveryMode::HighRiskFork
+        );
+        assert!(recovery.should_pause_mining());
+        assert_eq!(recovery.snapshot().peer_addr.as_deref(), Some(peer));
+    }
     #[test]
     fn should_sync_for_summary_detects_shorter_higher_work_peer() {
         let pm = PeerManager::new();

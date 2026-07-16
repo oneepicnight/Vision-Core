@@ -41,8 +41,7 @@ fn main() {
 async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -55,9 +54,10 @@ async fn async_main() -> Result<()> {
     let chain = Arc::new(Mutex::new(chain_state));
     let peer_manager = Arc::new(p2p::peer_manager::PeerManager::new());
     let mempool = Arc::new(mempool::Mempool::new());
-    let miner_manager = settings.mining_enabled.then(|| {
-        Arc::new(miner::MinerManager::new(*pow::visionx::VISIONX_PARAMS))
-    });
+    let miner_manager = settings
+        .mining_enabled
+        .then(|| Arc::new(miner::MinerManager::new(*pow::visionx::VISIONX_PARAMS)));
+    let recovery_state = Arc::new(node::recovery::RecoveryState::new());
 
     let seed_addrs = node::bootstrap::seed_peers(&settings);
     for addr in &seed_addrs {
@@ -70,12 +70,14 @@ async fn async_main() -> Result<()> {
         peer_manager.clone(),
         mempool.clone(),
         miner_manager.clone(),
+        recovery_state.clone(),
         &settings,
     )
     .await?;
 
     let mut api_state = api::state::NodeApiState::new(chain.clone(), mempool)
         .with_peer_manager(peer_manager.clone())
+        .with_recovery_state(recovery_state.clone())
         .with_alpha_airdrop_enabled(settings.alpha_airdrop_enabled);
     if let Some(miner_manager) = miner_manager {
         api_state = api_state.with_miner_manager(miner_manager);
@@ -106,9 +108,12 @@ fn print_banner(settings: &Settings) {
         NETWORK_ID,
         settings.p2p_addr,
         settings.http_addr,
-        if settings.mining_enabled { "enabled" } else { "disabled" },
+        if settings.mining_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
         settings.data_dir,
     );
     tracing::info!("vision-core {} starting", NODE_VERSION);
 }
-

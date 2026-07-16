@@ -10,6 +10,7 @@ use crate::config::constants::{BLOCK_TARGET_TXS, MIN_PEERS_FOR_MINING};
 use crate::config::settings::Settings;
 use crate::mempool::Mempool;
 use crate::miner::MinerManager;
+use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
@@ -26,6 +27,7 @@ pub async fn start_services(
     peer_manager: Arc<PeerManager>,
     mempool: Arc<Mempool>,
     miner_manager: Option<Arc<MinerManager>>,
+    recovery_state: Arc<RecoveryState>,
     settings: &Settings,
 ) -> Result<()> {
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
@@ -50,6 +52,7 @@ pub async fn start_services(
             let peer_manager_ref = peer_manager.clone();
             let conn_mgr_ref = conn_mgr.clone();
             let mempool_ref = mempool.clone();
+            let recovery_ref = recovery_state.clone();
             tokio::spawn(async move {
                 seed_peer_loop(
                     chain_ref,
@@ -57,6 +60,7 @@ pub async fn start_services(
                     conn_mgr_ref,
                     mempool_ref,
                     seed_peer,
+                    recovery_ref,
                 )
                 .await;
             });
@@ -68,6 +72,7 @@ pub async fn start_services(
         let pm = peer_manager.clone();
         let chain_ref = chain.clone();
         let mempool_ref = mempool.clone();
+        let recovery_ref = recovery_state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(20));
             let mut sync_guard = crate::p2p::sync::SyncGuard::new();
@@ -79,6 +84,7 @@ pub async fn start_services(
                     &pm,
                     &mut sync_guard,
                     Some(mempool_ref.as_ref()),
+                    Some(recovery_ref.as_ref()),
                 )
                 .await
                 {
@@ -95,6 +101,7 @@ pub async fn start_services(
             let peer_manager_ref = peer_manager.clone();
             let mempool_ref = mempool.clone();
             let miner_addr = settings.miner_address.clone();
+            let recovery_ref = recovery_state.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_millis(250));
                 loop {
@@ -102,6 +109,15 @@ pub async fn start_services(
 
                     if peer_manager_ref.connected_count() < MIN_PEERS_FOR_MINING {
                         miner_manager.clear_job();
+                        continue;
+                    }
+
+                    if recovery_ref.should_pause_mining() {
+                        miner_manager.clear_job();
+                        tracing::debug!(
+                            "[MINER] mining paused during {}",
+                            recovery_ref.snapshot().state
+                        );
                         continue;
                     }
 
@@ -182,6 +198,7 @@ async fn seed_peer_loop(
     conn_mgr: Arc<P2PConnectionManager>,
     mempool: Arc<Mempool>,
     peer_addr: String,
+    recovery_state: Arc<RecoveryState>,
 ) {
     let reconnect_delay = Duration::from_secs(2);
     let heartbeat_delay = Duration::from_secs(5);
@@ -306,6 +323,13 @@ async fn seed_peer_loop(
                         remote_summary.height.saturating_sub(local_summary.height),
                         remote_summary.tip_hash != local_summary.tip_hash
                     );
+                    if remote_has_more_work {
+                        recovery_state.begin_higher_work_recovery(
+                            &peer_addr,
+                            local_summary.clone(),
+                            remote_summary.clone(),
+                        );
+                    }
                     if remote_summary.height > local_summary.height || remote_has_more_work {
                         let lag = remote_summary.height.saturating_sub(local_summary.height);
                         tracing::info!(
@@ -334,13 +358,40 @@ async fn seed_peer_loop(
                             )
                             .await;
                             sync_guard.mark_done();
-                            if let Err(e) = result {
-                                tracing::warn!(
-                                    "[SYNC] catch-up trigger error for {}: {}",
-                                    peer_addr,
-                                    e
-                                );
-                                break;
+                            match result {
+                                Ok(_) if remote_has_more_work => {
+                                    let after = {
+                                        let g = chain.lock().await;
+                                        ChainSummary::from_chain(&g)
+                                    };
+                                    if after.cumulative_work >= remote_summary.cumulative_work {
+                                        recovery_state
+                                            .clear("higher-work branch adopted or no longer ahead");
+                                    } else {
+                                        recovery_state.mark_limited("higher-work recovery incomplete after seed-peer sync batch");
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    let reason = e.to_string();
+                                    if remote_has_more_work {
+                                        if reason.contains("sync import rejected") {
+                                            recovery_state
+                                                .clear("advertised branch was locally rejected");
+                                        } else {
+                                            recovery_state.mark_high_risk(format!(
+                                                "higher-work recovery failed: {}",
+                                                reason
+                                            ));
+                                        }
+                                    }
+                                    tracing::warn!(
+                                        "[SYNC] catch-up trigger error for {}: {}",
+                                        peer_addr,
+                                        e
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }

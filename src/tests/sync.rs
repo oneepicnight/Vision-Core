@@ -21,7 +21,7 @@ mod tests {
             pm.clone(),
         );
         let mut guard = SyncGuard::new();
-        watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None)
+        watchdog_step(&conn_mgr, &chain, pm.as_ref(), &mut guard, None, None)
             .await
             .expect("watchdog should not error");
     }

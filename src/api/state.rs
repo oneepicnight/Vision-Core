@@ -1,15 +1,18 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::api::mining::MiningInfoResponse;
-use crate::api::transactions::{submit_transaction as submit_transaction_service, TransactionSubmissionResult};
+use crate::api::transactions::{
+    submit_transaction as submit_transaction_service, TransactionSubmissionResult,
+};
 use crate::chain::{snapshots::save_snapshot, state_root::compute_state_root, ChainState};
 use crate::mempool::Mempool;
-use crate::types::transaction::canonical_tx_id;
 use crate::miner::MinerManager;
+use crate::node::recovery::{RecoveryState, RecoveryStatusSnapshot};
 use crate::p2p::peer_manager::PeerManager;
+use crate::types::transaction::canonical_tx_id;
 use crate::types::Tx;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -17,6 +20,8 @@ pub(crate) struct MiningStatusSnapshot {
     pub available: bool,
     pub active: bool,
     pub blocks_found: u64,
+    pub recovery_state: &'static str,
+    pub paused_reason: Option<String>,
 }
 
 impl MiningStatusSnapshot {
@@ -25,6 +30,8 @@ impl MiningStatusSnapshot {
             available: false,
             active: false,
             blocks_found: 0,
+            recovery_state: "normal",
+            paused_reason: None,
         }
     }
 }
@@ -39,6 +46,7 @@ pub(crate) struct NodeStatusSnapshot {
     pub mempool_size: usize,
     pub peer_count: usize,
     pub mining: MiningStatusSnapshot,
+    pub recovery: RecoveryStatusSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +98,7 @@ pub(crate) struct NodeApiState {
     mempool: Arc<Mempool>,
     peer_manager: Option<Arc<PeerManager>>,
     miner_manager: Option<Arc<MinerManager>>,
+    recovery_state: Arc<RecoveryState>,
     alpha_airdrop_enabled: bool,
 }
 
@@ -100,6 +109,7 @@ impl NodeApiState {
             mempool,
             peer_manager: None,
             miner_manager: None,
+            recovery_state: Arc::new(RecoveryState::new()),
             alpha_airdrop_enabled: false,
         }
     }
@@ -110,6 +120,11 @@ impl NodeApiState {
     }
     pub(crate) fn with_miner_manager(mut self, miner_manager: Arc<MinerManager>) -> Self {
         self.miner_manager = Some(miner_manager);
+        self
+    }
+
+    pub(crate) fn with_recovery_state(mut self, recovery_state: Arc<RecoveryState>) -> Self {
+        self.recovery_state = recovery_state;
         self
     }
 
@@ -154,6 +169,7 @@ impl NodeApiState {
             .as_ref()
             .map(|peers| peers.connected_count())
             .unwrap_or(0);
+        let recovery = self.recovery_state.snapshot();
         let mining = self
             .miner_manager
             .as_ref()
@@ -161,8 +177,10 @@ impl NodeApiState {
                 let stats = miner.stats();
                 MiningStatusSnapshot {
                     available: true,
-                    active: miner.is_mining(),
+                    active: miner.is_mining() && !self.recovery_state.should_pause_mining(),
                     blocks_found: stats.blocks_found,
+                    recovery_state: recovery.state,
+                    paused_reason: recovery.reason.clone(),
                 }
             })
             .unwrap_or_else(MiningStatusSnapshot::unavailable);
@@ -176,6 +194,7 @@ impl NodeApiState {
             mempool_size,
             peer_count,
             mining,
+            recovery,
         }
     }
     pub(crate) async fn mining_info_snapshot(&self) -> MiningInfoResponse {
@@ -184,11 +203,21 @@ impl NodeApiState {
             (chain.current_height(), chain.difficulty)
         };
 
+        let recovery = self.recovery_state.snapshot();
+
         MiningInfoResponse {
             enabled: self.has_miner_manager(),
             height,
             difficulty,
             epoch: crate::pow::visionx::VISIONX_PARAMS.epoch(height),
+            active: self
+                .miner_manager
+                .as_ref()
+                .map(|miner| miner.is_mining())
+                .unwrap_or(false)
+                && !self.recovery_state.should_pause_mining(),
+            recovery_state: recovery.state,
+            paused_reason: recovery.reason,
             hash_rate_estimate: None,
         }
     }
@@ -259,7 +288,12 @@ impl NodeApiState {
         if !self.alpha_airdrop_enabled {
             return Err(AlphaAirdropError::Disabled);
         }
-        if address.len() != 64 || !address.as_bytes().iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        if address.len() != 64
+            || !address
+                .as_bytes()
+                .iter()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
             return Err(AlphaAirdropError::InvalidAddress);
         }
         if amount == 0 {
@@ -277,7 +311,8 @@ impl NodeApiState {
             let state_root = compute_state_root(&chain.balances, &chain.nonces)
                 .map_err(|_| AlphaAirdropError::StateRootComputationFailed)?;
             chain.cached_state_root = Some((height, state_root.clone()));
-            save_snapshot(&chain, height).map_err(|_| AlphaAirdropError::SnapshotPersistenceFailed)?;
+            save_snapshot(&chain, height)
+                .map_err(|_| AlphaAirdropError::SnapshotPersistenceFailed)?;
 
             Ok(AlphaAirdropSnapshot {
                 status: "accepted",
@@ -382,6 +417,9 @@ mod tests {
         assert_eq!(snapshot.mining.available, true);
         assert_eq!(snapshot.mining.active, false);
         assert_eq!(snapshot.mining.blocks_found, 0);
+        assert_eq!(snapshot.mining.recovery_state, "normal");
+        assert_eq!(snapshot.mining.paused_reason, None);
+        assert_eq!(snapshot.recovery.state, "normal");
     }
 
     #[tokio::test]
@@ -445,6 +483,32 @@ mod tests {
         assert_eq!(snapshot.tx, Some(tx));
     }
 
+    #[tokio::test]
+    async fn status_snapshot_reports_higher_work_recovery_state() {
+        let chain = Arc::new(Mutex::new(temp_state()));
+        let mempool = Arc::new(Mempool::new());
+        let miner_manager = Arc::new(MinerManager::new(VisionXParams::default()));
+        let recovery = Arc::new(RecoveryState::new());
+        recovery.begin_higher_work_recovery(
+            "127.0.0.1:9009",
+            crate::p2p::protocol::ChainSummary::new(83, Some("local".to_string()), 1754),
+            crate::p2p::protocol::ChainSummary::new(81, Some("remote".to_string()), 1757),
+        );
+
+        let state = NodeApiState::new(chain, mempool)
+            .with_miner_manager(miner_manager)
+            .with_recovery_state(recovery);
+        let snapshot = state.status_snapshot().await;
+
+        assert_eq!(snapshot.recovery.state, "higher_work_recovery");
+        assert_eq!(
+            snapshot.recovery.peer_addr.as_deref(),
+            Some("127.0.0.1:9009")
+        );
+        assert_eq!(snapshot.mining.recovery_state, "higher_work_recovery");
+        assert!(!snapshot.mining.active);
+        assert!(snapshot.mining.paused_reason.is_some());
+    }
     #[test]
     fn status_snapshot_json_schema_is_deterministic() {
         let snapshot = NodeStatusSnapshot {
@@ -456,32 +520,17 @@ mod tests {
             mempool_size: 0,
             peer_count: 0,
             mining: MiningStatusSnapshot::unavailable(),
+            recovery: crate::node::recovery::RecoveryState::new().snapshot(),
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(
             json,
             format!(
-                "{{\"version\":\"{}\",\"canonical_tip_height\":0,\"canonical_tip_hash\":\"{}\",\"cached_state_root_height\":null,\"cached_state_root\":null,\"mempool_size\":0,\"peer_count\":0,\"mining\":{{\"available\":false,\"active\":false,\"blocks_found\":0}}}}",
+                "{{\"version\":\"{}\",\"canonical_tip_height\":0,\"canonical_tip_hash\":\"{}\",\"cached_state_root_height\":null,\"cached_state_root\":null,\"mempool_size\":0,\"peer_count\":0,\"mining\":{{\"available\":false,\"active\":false,\"blocks_found\":0,\"recovery_state\":\"normal\",\"paused_reason\":null}},\"recovery\":{{\"state\":\"normal\",\"peer_addr\":null,\"local_height\":null,\"local_work\":null,\"local_tip_hash\":null,\"remote_height\":null,\"remote_work\":null,\"remote_tip_hash\":null,\"reason\":null}}}}",
                 crate::config::constants::NODE_VERSION,
                 "00".repeat(32),
             )
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
