@@ -454,9 +454,23 @@ async fn poll_peer_height(
 ) -> Result<ChainSummary> {
     peer_manager.record_height_poll_sent(peer_addr);
     send_message(stream, &P2PMessage::GetHeight).await?;
-    let remote_summary =
+    let mut remote_summary = None;
+    for _ in 0..8 {
         match tokio::time::timeout(Duration::from_secs(5), recv_message(stream)).await {
-            Ok(Ok(P2PMessage::Height { summary })) => summary,
+            Ok(Ok(P2PMessage::Height { summary })) => {
+                remote_summary = Some(summary);
+                break;
+            }
+            Ok(Ok(P2PMessage::GetHeight)) => {
+                let summary = {
+                    let g = chain.lock().await;
+                    ChainSummary::from_chain(&g)
+                };
+                send_message(stream, &P2PMessage::Height { summary }).await?;
+            }
+            Ok(Ok(P2PMessage::Ping { timestamp })) => {
+                send_message(stream, &P2PMessage::Pong { timestamp }).await?;
+            }
             Ok(Ok(P2PMessage::Disconnect { reason })) => {
                 return Err(anyhow::anyhow!("peer rejected height query: {}", reason))
             }
@@ -468,7 +482,10 @@ async fn poll_peer_height(
             }
             Ok(Err(e)) => return Err(anyhow::anyhow!("height poll read error: {}", e)),
             Err(_) => return Err(anyhow::anyhow!("height poll timeout for {}", peer_addr)),
-        };
+        }
+    }
+    let remote_summary = remote_summary
+        .ok_or_else(|| anyhow::anyhow!("height poll exceeded message limit for {}", peer_addr))?;
     peer_manager.note_peer_summary(peer_addr, remote_summary.clone(), false);
     let local_summary = {
         let g = chain.lock().await;

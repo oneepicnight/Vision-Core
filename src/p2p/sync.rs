@@ -160,13 +160,31 @@ pub(crate) async fn live_sync_from_peer(
     );
 
     send_message(&mut stream, &P2PMessage::GetHeight).await?;
-    let remote_summary = match recv_message(&mut stream).await? {
-        P2PMessage::Height { summary } => summary,
-        P2PMessage::Disconnect { reason } => {
-            return Err(anyhow!("peer rejected height query: {}", reason))
+    let mut remote_summary = None;
+    for _ in 0..8 {
+        match tokio::time::timeout(Duration::from_secs(5), recv_message(&mut stream)).await?? {
+            P2PMessage::Height { summary } => {
+                remote_summary = Some(summary);
+                break;
+            }
+            P2PMessage::GetHeight => {
+                let summary = {
+                    let g = chain.lock().await;
+                    ChainSummary::from_chain(&g)
+                };
+                send_message(&mut stream, &P2PMessage::Height { summary }).await?;
+            }
+            P2PMessage::Ping { timestamp } => {
+                send_message(&mut stream, &P2PMessage::Pong { timestamp }).await?;
+            }
+            P2PMessage::Disconnect { reason } => {
+                return Err(anyhow!("peer rejected height query: {}", reason))
+            }
+            other => return Err(anyhow!("unexpected height reply: {}", other.label())),
         }
-        other => return Err(anyhow!("unexpected height reply: {}", other.label())),
-    };
+    }
+    let remote_summary = remote_summary
+        .ok_or_else(|| anyhow!("height query exceeded message limit for {}", peer_addr))?;
     peer_manager.note_peer_summary(peer_addr, remote_summary.clone(), false);
 
     let local_summary = {
@@ -420,9 +438,9 @@ pub async fn watchdog_step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::protocol::HandshakeMessage;
     use crate::chain::accept::{apply_block, tests_helpers::make_test_block};
     use crate::p2p::peer_manager::PeerState;
+    use crate::p2p::protocol::HandshakeMessage;
     use tokio::time::{timeout, Duration};
 
     fn temp_state() -> ChainState {

@@ -165,9 +165,9 @@ pub const ORPHAN_POOL_MAX: usize = 2_000;
 // â”€â”€â”€ Peer / P2P â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// [POLICY] A peer's reported height is considered stale if it has not been
-/// refreshed within this many seconds. Stale peers are excluded from the
-/// consensus height estimate and the mining gate.
-pub const PEER_HEIGHT_STALE_SECS: u64 = 15;
+/// refreshed within this many seconds. The window must exceed the sync
+/// watchdog cadence so inbound-only summary refreshes can be consumed.
+pub const PEER_HEIGHT_STALE_SECS: u64 = 45;
 
 /// [POLICY] If a height poll sent to a peer has not received a response within
 /// this window (seconds), the peer is treated as height-stalled and excluded
@@ -307,6 +307,13 @@ mod tests {
     #[test]
     fn sync_lag_threshold_matches_alias() {
         assert_eq!(SYNC_LAG_THRESHOLD, SYNC_CLEAR_JOB_MIN_LAG);
+    }
+
+    #[test]
+    fn peer_summary_freshness_survives_watchdog_cadence() {
+        const SYNC_WATCHDOG_INTERVAL_SECS: u64 = 20;
+        assert!(PEER_HEIGHT_STALE_SECS > SYNC_WATCHDOG_INTERVAL_SECS);
+        assert!(PEER_HEIGHT_STALE_SECS > HEIGHT_POLL_RESPONSE_WINDOW_SECS);
     }
 
     #[test]

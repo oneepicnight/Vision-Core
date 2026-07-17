@@ -57,6 +57,15 @@ pub struct Peer {
 
     /// Wall-clock instant of the last message (any kind) received.
     pub last_activity: Option<Instant>,
+
+    /// Monotonic connection generation for this durable peer identity.
+    pub connection_generation: u64,
+
+    /// Generation that last refreshed the full chain summary.
+    pub summary_generation: Option<u64>,
+
+    /// Diagnostic source of the last full chain summary refresh.
+    pub summary_source: Option<String>,
 }
 
 impl Peer {
@@ -74,6 +83,9 @@ impl Peer {
             last_height_poll_sent_at: None,
             last_height_response_at: None,
             last_activity: None,
+            connection_generation: 0,
+            summary_generation: None,
+            summary_source: None,
         }
     }
 
@@ -191,6 +203,8 @@ impl PeerManager {
                 peer.last_height_updated_at = None;
                 peer.last_height_response_at = None;
                 peer.last_height_poll_sent_at = None;
+                peer.summary_generation = None;
+                peer.summary_source = None;
             }
         }
     }
@@ -220,9 +234,32 @@ impl PeerManager {
     /// Lower-height summaries are accepted when they advertise strictly more
     /// cumulative work; that is the condition needed to discover shorter but
     /// higher-work forks. Lower-work stale summaries only refresh activity.
-    pub fn note_peer_summary(&self, addr: &str, summary: ChainSummary, _in_bulk_sync: bool) {
+    pub fn note_peer_summary(&self, addr: &str, summary: ChainSummary, in_bulk_sync: bool) {
+        self.note_peer_summary_from(addr, summary, None, None, in_bulk_sync);
+    }
+
+    pub fn note_peer_summary_from(
+        &self,
+        addr: &str,
+        summary: ChainSummary,
+        generation: Option<u64>,
+        source: Option<&str>,
+        _in_bulk_sync: bool,
+    ) {
         let mut peers = self.peers.write().unwrap();
         if let Some(peer) = peers.get_mut(addr) {
+            if generation
+                .map(|generation| generation < peer.connection_generation)
+                .unwrap_or(false)
+            {
+                tracing::debug!(
+                    "[P2P] stale peer summary ignored addr={} generation={:?} current_generation={}",
+                    addr,
+                    generation,
+                    peer.connection_generation
+                );
+                return;
+            }
             let now = Instant::now();
             let should_update = summary.cumulative_work > peer.cumulative_work
                 || summary.height >= peer.height
@@ -242,6 +279,8 @@ impl PeerManager {
                 peer.tip_hash = summary.tip_hash;
                 peer.cumulative_work = summary.cumulative_work;
                 peer.last_height_updated_at = Some(now);
+                peer.summary_generation = generation.or(Some(peer.connection_generation));
+                peer.summary_source = source.map(str::to_string);
             }
             peer.last_height_response_at = Some(now);
             peer.last_activity = Some(now);
@@ -334,8 +373,6 @@ impl PeerManager {
             .map(|p| p.addr.clone())
     }
 
-
-
     pub fn peer_counts(&self) -> PeerCounts {
         let peers = self.peers.read().unwrap();
         let durable_peers = peers.len();
@@ -349,7 +386,9 @@ impl PeerManager {
             .count();
         let transient_connections = peers
             .values()
-            .filter(|p| p.state == PeerState::Connected && p.advertised_addr.is_none() && !p.is_outbound)
+            .filter(|p| {
+                p.state == PeerState::Connected && p.advertised_addr.is_none() && !p.is_outbound
+            })
             .count();
         let dialable_peers = peers
             .values()
@@ -383,6 +422,7 @@ impl PeerManager {
         let peer = peers
             .entry(durable_addr.clone())
             .or_insert_with(|| Peer::new(durable_addr.clone(), false));
+        peer.connection_generation = peer.connection_generation.saturating_add(1);
         peer.observed_addr = Some(observed_addr.to_string());
         if durable_addr != observed_addr {
             peer.advertised_addr = Some(durable_addr.clone());
@@ -396,6 +436,15 @@ impl PeerManager {
             peer.observed_addr = Some(observed_addr.to_string());
         }
     }
+
+    pub fn peer_generation(&self, peer_addr: &str) -> Option<u64> {
+        self.peers
+            .read()
+            .unwrap()
+            .get(peer_addr)
+            .map(|peer| peer.connection_generation)
+    }
+
 
     pub fn peer_summary(&self, addr: &str) -> Option<ChainSummary> {
         self.peers.read().unwrap().get(addr).map(Peer::summary)
@@ -421,7 +470,6 @@ mod tests {
         }
         pm
     }
-
 
     fn advertised_hs(host: &str, port: u16) -> HandshakeMessage {
         let mut hs = HandshakeMessage::new(0, 42);
@@ -449,7 +497,9 @@ mod tests {
     fn inbound_without_identity_is_transient_non_dialable() {
         let pm = PeerManager::new();
         let hs = HandshakeMessage::new(0, 42);
-        let key = pm.resolve_inbound_peer_key("127.0.0.1:51000", &hs, true).unwrap();
+        let key = pm
+            .resolve_inbound_peer_key("127.0.0.1:51000", &hs, true)
+            .unwrap();
         assert_eq!(key, "127.0.0.1:51000");
         pm.set_state(&key, PeerState::Connected);
         let counts = pm.peer_counts();
@@ -462,8 +512,12 @@ mod tests {
     fn source_port_churn_deduplicates_by_advertised_identity() {
         let pm = PeerManager::new();
         let hs = advertised_hs("127.0.0.1", 9001);
-        let first = pm.resolve_inbound_peer_key("127.0.0.1:51000", &hs, true).unwrap();
-        let second = pm.resolve_inbound_peer_key("127.0.0.1:51001", &hs, true).unwrap();
+        let first = pm
+            .resolve_inbound_peer_key("127.0.0.1:51000", &hs, true)
+            .unwrap();
+        let second = pm
+            .resolve_inbound_peer_key("127.0.0.1:51001", &hs, true)
+            .unwrap();
         assert_eq!(first, second);
         assert_eq!(pm.peer_counts().durable_peers, 1);
     }
@@ -472,7 +526,11 @@ mod tests {
     fn public_mode_rejects_private_advertised_address() {
         let pm = PeerManager::new();
         let err = pm
-            .resolve_inbound_peer_key("198.51.100.7:51000", &advertised_hs("127.0.0.1", 9001), false)
+            .resolve_inbound_peer_key(
+                "198.51.100.7:51000",
+                &advertised_hs("127.0.0.1", 9001),
+                false,
+            )
             .unwrap_err();
         assert!(err.contains("private advertised address"));
     }
@@ -492,6 +550,46 @@ mod tests {
         assert_eq!(pm.best_work_sync_target("local", 1754), Some(key));
     }
 
+    #[test]
+    fn summary_generation_and_source_are_recorded_and_stale_generation_ignored() {
+        let pm = PeerManager::new();
+        let key = pm
+            .resolve_inbound_peer_key("127.0.0.1:51000", &advertised_hs("127.0.0.1", 9001), true)
+            .unwrap();
+        pm.set_state(&key, PeerState::Connected);
+        pm.note_peer_summary_from(
+            &key,
+            ChainSummary::new(134, Some("fresh".to_string()), 7608),
+            Some(1),
+            Some("inbound handshake refresh"),
+            false,
+        );
+        let peer = pm
+            .snapshot()
+            .into_iter()
+            .find(|peer| peer.addr == key)
+            .unwrap();
+        assert_eq!(peer.summary_generation, Some(1));
+        assert_eq!(
+            peer.summary_source.as_deref(),
+            Some("inbound handshake refresh")
+        );
+
+        pm.resolve_inbound_peer_key("127.0.0.1:51001", &advertised_hs("127.0.0.1", 9001), true)
+            .unwrap();
+        pm.note_peer_summary_from(
+            &key,
+            ChainSummary::new(200, Some("stale".to_string()), 9000),
+            Some(1),
+            Some("old generation"),
+            false,
+        );
+        let summary = pm.peer_summary(&key).unwrap();
+        assert_eq!(summary.height, 134);
+        assert_eq!(summary.cumulative_work, 7608);
+        assert_eq!(summary.tip_hash.as_deref(), Some("fresh"));
+        assert_eq!(pm.peer_generation(&key), Some(2));
+    }
     #[test]
     fn best_remote_height_zero_when_no_peers() {
         let pm = PeerManager::new();

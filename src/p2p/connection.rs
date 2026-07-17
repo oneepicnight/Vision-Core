@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -170,6 +171,71 @@ impl P2PConnectionManager {
     }
 }
 
+const INBOUND_SUMMARY_REFRESH_SOURCE: &str = "inbound handshake refresh";
+const INBOUND_SUMMARY_REFRESH_MAX_MESSAGES: usize = 8;
+
+async fn request_inbound_peer_summary<S>(
+    stream: &mut S,
+    peer_key: &str,
+    generation: u64,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_manager: &Arc<PeerManager>,
+) -> Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    peer_manager.record_height_poll_sent(peer_key);
+    send_message(stream, &P2PMessage::GetHeight).await?;
+
+    for _ in 0..INBOUND_SUMMARY_REFRESH_MAX_MESSAGES {
+        let msg = tokio::time::timeout(Duration::from_secs(5), recv_message(stream)).await??;
+        match msg {
+            P2PMessage::Height { summary } => {
+                peer_manager.note_peer_summary_from(
+                    peer_key,
+                    summary.clone(),
+                    Some(generation),
+                    Some(INBOUND_SUMMARY_REFRESH_SOURCE),
+                    false,
+                );
+                tracing::info!(
+                    "[P2P] inbound summary refresh peer={} height={} work={} tip={:?} generation={}",
+                    peer_key,
+                    summary.height,
+                    summary.cumulative_work,
+                    summary.tip_hash,
+                    generation
+                );
+                return Ok(());
+            }
+            P2PMessage::GetHeight => {
+                let summary = {
+                    let g = chain.lock().await;
+                    ChainSummary::from_chain(&g)
+                };
+                send_message(stream, &P2PMessage::Height { summary }).await?;
+            }
+            P2PMessage::Ping { timestamp } => {
+                send_message(stream, &P2PMessage::Pong { timestamp }).await?;
+            }
+            P2PMessage::Disconnect { reason } => {
+                anyhow::bail!(
+                    "peer disconnected during inbound summary refresh: {}",
+                    reason
+                );
+            }
+            other => anyhow::bail!(
+                "unexpected inbound summary refresh reply: {}",
+                other.label()
+            ),
+        }
+    }
+
+    anyhow::bail!(
+        "inbound summary refresh exceeded message limit for {}",
+        peer_key
+    )
+}
 // --- Inbound message dispatch -----------------------------------------------
 
 fn derive_local_node_nonce(listen_addr: SocketAddr) -> u64 {
@@ -284,6 +350,27 @@ async fn handle_inbound<S>(
                                 }
                                 tracing::trace!("[P2P] -> {} Handshake accepted", addr);
                                 handshake_done = true;
+                                if peer_key != observed_addr {
+                                    if let Some(generation) =
+                                        peer_manager.peer_generation(&peer_key)
+                                    {
+                                        if let Err(e) = request_inbound_peer_summary(
+                                            &mut stream,
+                                            &peer_key,
+                                            generation,
+                                            &chain,
+                                            &peer_manager,
+                                        )
+                                        .await
+                                        {
+                                            tracing::debug!(
+                                                "[P2P] {} inbound summary refresh failed: {}",
+                                                peer_key,
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             other => {
                                 peer_manager.upsert(&addr.to_string(), false);
@@ -604,6 +691,102 @@ mod tests {
             .unwrap();
         assert_eq!(peer_manager.connected_count(), 1);
         assert_eq!(peer_manager.best_remote_height(), 17);
+    }
+    #[tokio::test]
+    async fn inbound_advertised_peer_refreshes_full_summary_on_active_stream() {
+        let addr: SocketAddr = "127.0.0.1:19009".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain.clone(),
+            peer_manager.clone(),
+            local_nonce,
+            Some("127.0.0.1".to_string()),
+            Some(19010),
+            true,
+        ));
+
+        let remote = HandshakeMessage::new_with_advertised(
+            134,
+            local_nonce + 1,
+            Some("127.0.0.1".to_string()),
+            Some(61129),
+        );
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
+        let reply = recv_message(&mut client).await.unwrap();
+        let _local_hs = accepted_handshake_response(reply, local_nonce);
+
+        send_message(&mut client, &P2PMessage::GetHeight)
+            .await
+            .unwrap();
+
+        let mut saw_server_height = false;
+        let mut answered_server_get_height = false;
+        for _ in 0..2 {
+            match recv_message(&mut client).await.unwrap() {
+                P2PMessage::GetHeight => {
+                    answered_server_get_height = true;
+                    send_message(
+                        &mut client,
+                        &P2PMessage::Height {
+                            summary: ChainSummary::new(
+                                134,
+                                Some("02ab8b991ecfbdecf5caaa532b58fa08a0ff20361ede688153edb825a9950977".to_string()),
+                                7608,
+                            ),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                P2PMessage::Height { summary } => {
+                    saw_server_height = true;
+                    assert_eq!(summary.height, 0);
+                }
+                other => panic!("unexpected message during summary refresh: {:?}", other),
+            }
+        }
+        assert!(answered_server_get_height);
+        assert!(saw_server_height);
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let key = "127.0.0.1:61129";
+        let summary = peer_manager.peer_summary(key).unwrap();
+        assert_eq!(summary.height, 134);
+        assert_eq!(summary.cumulative_work, 7608);
+        assert_eq!(
+            summary.tip_hash.as_deref(),
+            Some("02ab8b991ecfbdecf5caaa532b58fa08a0ff20361ede688153edb825a9950977")
+        );
+        assert_eq!(
+            peer_manager.best_work_sync_target("local", 7517),
+            Some(key.to_string())
+        );
+
+        let peer = peer_manager
+            .snapshot()
+            .into_iter()
+            .find(|peer| peer.addr == key)
+            .unwrap();
+        assert_eq!(peer.observed_addr.as_deref(), Some("127.0.0.1:19009"));
+        assert_eq!(peer.advertised_addr.as_deref(), Some(key));
+        assert_eq!(peer.connection_generation, 1);
+        assert_eq!(peer.summary_generation, Some(1));
+        assert_eq!(
+            peer.summary_source.as_deref(),
+            Some(INBOUND_SUMMARY_REFRESH_SOURCE)
+        );
     }
     #[tokio::test]
     async fn inbound_handshake_rejects_wrong_chain_id() {
