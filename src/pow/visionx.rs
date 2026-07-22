@@ -3,8 +3,10 @@ use crate::pow::historical_vpow::historical_vpow_message_bytes_with_nonce_zero;
 use crate::pow::U256;
 use crate::types::BlockHeader;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+
+
 
 // â”€â”€â”€ Algorithm parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -13,7 +15,7 @@ use std::sync::{Arc, Mutex};
 /// All fields are consensus-critical. Every miner and every validator must use
 /// identical values. Parameters are defined in `config/constants.rs` [CONSENSUS];
 /// they are gathered here into a single struct for handshake verification.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VisionXParams {
     /// Base dataset size in megabytes.
     pub dataset_mb: usize,
@@ -77,10 +79,130 @@ impl VisionXParams {
 pub static VISIONX_PARAMS: Lazy<VisionXParams> = Lazy::new(VisionXParams::default);
 
 #[allow(dead_code)]
-type DatasetCache = HashMap<(u64, [u8; 32]), (Arc<Vec<u64>>, usize)>;
+type DatasetCacheKey = (VisionXParams, u64, [u8; 32]);
 
 #[allow(dead_code)]
-static DATASET_CACHE: Lazy<Mutex<DatasetCache>> = Lazy::new(|| Mutex::new(HashMap::new()));
+const DATASET_CACHE_CAPACITY: usize = 3;
+#[allow(dead_code)]
+#[derive(Default)]
+struct DatasetCache {
+    entries: HashMap<DatasetCacheKey, (Arc<Vec<u64>>, usize)>,
+    order: VecDeque<DatasetCacheKey>,
+}
+
+#[allow(dead_code)]
+impl DatasetCache {
+    fn get(&self, key: &DatasetCacheKey) -> Option<(Arc<Vec<u64>>, usize)> {
+        let result = self
+            .entries
+            .get(key)
+            .map(|(dataset, mask)| (Arc::clone(dataset), *mask));
+        result
+    }
+
+    fn insert_if_absent(
+        &mut self,
+        key: DatasetCacheKey,
+        dataset: Arc<Vec<u64>>,
+        mask: usize,
+    ) -> CacheInsertResult {
+        if let Some((existing, existing_mask)) = self.get(&key) {
+            self.retain_order_for_entries();
+            return CacheInsertResult {
+                dataset: existing,
+                mask: existing_mask,
+                inserted: false,
+                evicted: Vec::new(),
+            };
+        }
+
+        self.entries.insert(key, (Arc::clone(&dataset), mask));
+        self.order.retain(|queued| *queued != key);
+        self.order.push_back(key);
+        let evicted = self.evict_over_capacity(&key);
+
+        CacheInsertResult {
+            dataset,
+            mask,
+            inserted: true,
+            evicted,
+        }
+    }
+
+    fn evict_over_capacity(&mut self, active_key: &DatasetCacheKey) -> Vec<DatasetCacheKey> {
+        self.evict_over_capacity_limit(active_key, DATASET_CACHE_CAPACITY)
+    }
+
+    fn evict_over_capacity_limit(
+        &mut self,
+        active_key: &DatasetCacheKey,
+        capacity: usize,
+    ) -> Vec<DatasetCacheKey> {
+        let mut evicted = Vec::new();
+        let mut rotations = 0usize;
+        while self.entries.len() > capacity && rotations <= self.order.len() {
+            let Some(candidate) = self.order.pop_front() else {
+                break;
+            };
+            if !self.entries.contains_key(&candidate) {
+                continue;
+            }
+            if &candidate == active_key {
+                self.order.push_back(candidate);
+                rotations += 1;
+                continue;
+            }
+            if self.entries.remove(&candidate).is_some() {
+                evicted.push(candidate);
+                rotations = 0;
+            }
+        }
+        self.retain_order_for_entries();
+        evicted
+    }
+
+    fn retain_order_for_entries(&mut self) {
+        let mut seen = Vec::new();
+        self.order.retain(|key| {
+            if !self.entries.contains_key(key) || seen.contains(key) {
+                return false;
+            }
+            seen.push(*key);
+            true
+        });
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, key: &DatasetCacheKey) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    #[cfg(test)]
+    fn order_len(&self) -> usize {
+        self.order.len()
+    }
+}
+
+#[allow(dead_code)]
+struct CacheInsertResult {
+    dataset: Arc<Vec<u64>>,
+    mask: usize,
+    inserted: bool,
+    evicted: Vec<DatasetCacheKey>,
+}
+
+#[allow(dead_code)]
+static DATASET_CACHE: Lazy<Mutex<DatasetCache>> = Lazy::new(|| Mutex::new(DatasetCache::default()));
 
 #[allow(dead_code)]
 struct VisionXDataset {
@@ -117,12 +239,27 @@ impl VisionXDataset {
         prev_hash32: &[u8; 32],
         epoch: u64,
     ) -> (Arc<Vec<u64>>, usize) {
-        let key = (epoch, *prev_hash32);
+        #[cfg(test)]
+        if std::env::var("VISION_POW_DIAGNOSTIC_BYPASS_DATASET_CACHE")
+            .ok()
+            .as_deref()
+            == Some("1")
+            || std::env::var("VISION_POW_DIAGNOSTIC_FRESH_DATASET")
+                .ok()
+                .as_deref()
+                == Some("1")
+        {
+            let ds = Self::build(params, prev_hash32, epoch);
+            let mask = ds.mask;
+            return (Arc::new(ds.mem.to_vec()), mask);
+        }
+
+        let key = (*params, epoch, *prev_hash32);
 
         {
             let cache = DATASET_CACHE.lock().unwrap();
             if let Some((dataset, mask)) = cache.get(&key) {
-                return (Arc::clone(dataset), *mask);
+                return (dataset, mask);
             }
         }
 
@@ -130,17 +267,12 @@ impl VisionXDataset {
         let dataset_arc = Arc::new(ds.mem.to_vec());
         let mask = ds.mask;
 
-        {
+        let inserted = {
             let mut cache = DATASET_CACHE.lock().unwrap();
-            cache.insert(key, (Arc::clone(&dataset_arc), mask));
-            if cache.len() > 3 {
-                if let Some(oldest_key) = cache.keys().next().copied() {
-                    cache.remove(&oldest_key);
-                }
-            }
-        }
+            cache.insert_if_absent(key, Arc::clone(&dataset_arc), mask)
+        };
 
-        (dataset_arc, mask)
+        (inserted.dataset, inserted.mask)
     }
 
     fn clear_cache() {
@@ -377,13 +509,14 @@ pub(crate) fn historical_block_digest(
 ) -> Result<U256, String> {
     let prev_hash32 = decode_hash_32(&header.parent_hash)?;
     let historical_preimage = historical_vpow_message_bytes_with_nonce_zero(header)?;
-    visionx_digest(
+    let digest = visionx_digest(
         params,
         &prev_hash32,
         epoch,
         historical_preimage.as_slice(),
         header.nonce,
-    )
+    )?;
+    Ok(digest)
 }
 
 /// Verify a historical VisionX candidate.
@@ -622,6 +755,356 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
+    }
+    #[test]
+    fn dataset_cache_distinguishes_params_for_same_epoch_and_parent() {
+        let small = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let production = *VISIONX_PARAMS;
+        let prev = [0x5fu8; 32];
+        VisionXDataset::clear_cache();
+
+        let (small_dataset, small_mask) = VisionXDataset::get_cached(&small, &prev, 0);
+        let (production_dataset, production_mask) =
+            VisionXDataset::get_cached(&production, &prev, 0);
+
+        assert_ne!(small_mask, production_mask);
+        assert!(!Arc::ptr_eq(&small_dataset, &production_dataset));
+
+        let (small_again, small_again_mask) = VisionXDataset::get_cached(&small, &prev, 0);
+        assert_eq!(small_again_mask, small_mask);
+        assert!(Arc::ptr_eq(&small_dataset, &small_again));
+
+        let (production_again, production_again_mask) =
+            VisionXDataset::get_cached(&production, &prev, 0);
+        assert_eq!(production_again_mask, production_mask);
+        assert!(Arc::ptr_eq(&production_dataset, &production_again));
+    }
+
+    #[test]
+    fn dataset_cache_fifo_eviction_never_removes_active_key() {
+        let params = VisionXParams {
+            dataset_mb: 1,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        };
+        let mut cache = DatasetCache::default();
+        let keys = [
+            (params, 0, [1u8; 32]),
+            (params, 0, [2u8; 32]),
+            (params, 0, [3u8; 32]),
+            (params, 0, [4u8; 32]),
+        ];
+
+        for (i, key) in keys.iter().enumerate() {
+            let dataset = Arc::new(vec![i as u64 + 1]);
+            let result = cache.insert_if_absent(*key, dataset, 0);
+            assert!(result.inserted);
+        }
+
+        assert_eq!(cache.len(), DATASET_CACHE_CAPACITY);
+        assert!(!cache.contains_key(&keys[0]));
+        assert!(cache.contains_key(&keys[1]));
+        assert!(cache.contains_key(&keys[2]));
+        assert!(cache.contains_key(&keys[3]));
+        assert_eq!(cache.order_len(), cache.len());
+    }
+    fn test_params(dataset_mb: usize) -> VisionXParams {
+        VisionXParams {
+            dataset_mb,
+            scratch_mb: 1,
+            mix_iters: 1,
+            reads_per_iter: 2,
+            write_every: 1,
+            epoch_blocks: 32,
+        }
+    }
+
+    fn dataset_fingerprint(dataset: &[u64]) -> [u8; 32] {
+        let mut bytes = Vec::with_capacity(dataset.len() * 8);
+        for word in dataset {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        *blake3::hash(&bytes).as_bytes()
+    }
+
+    fn assert_cache_invariants(cache: &DatasetCache) {
+        let mut unique = Vec::new();
+        for key in cache.order.iter() {
+            assert!(cache.entries.contains_key(key), "FIFO key missing from map");
+            assert!(!unique.contains(key), "duplicate FIFO key");
+            unique.push(*key);
+        }
+        for key in cache.entries.keys() {
+            assert!(unique.contains(key), "map key missing from FIFO");
+        }
+        assert_eq!(cache.entries.len(), unique.len());
+    }
+
+    #[test]
+    fn dataset_cache_repeated_requests_have_one_fingerprint() {
+        let params = test_params(1);
+        let prev = [0x5fu8; 32];
+        VisionXDataset::clear_cache();
+        let (first, first_mask) = VisionXDataset::get_cached(&params, &prev, 0);
+        let first_fingerprint = dataset_fingerprint(&first);
+
+        for _ in 0..10_000 {
+            let (dataset, mask) = VisionXDataset::get_cached(&params, &prev, 0);
+            assert_eq!(mask, first_mask);
+            assert_eq!(dataset_fingerprint(&dataset), first_fingerprint);
+            assert!(Arc::ptr_eq(&dataset, &first));
+        }
+    }
+
+    #[test]
+    fn dataset_cache_clear_and_rebuild_is_stable() {
+        let params = test_params(1);
+        let prev = [0x5fu8; 32];
+        let expected = dataset_fingerprint(&VisionXDataset::build(&params, &prev, 0).mem);
+
+        for _ in 0..1_000 {
+            VisionXDataset::clear_cache();
+            let (dataset, _) = VisionXDataset::get_cached(&params, &prev, 0);
+            assert_eq!(dataset_fingerprint(&dataset), expected);
+        }
+    }
+
+    #[test]
+    fn dataset_cache_pressure_is_deterministic_for_test_capacities() {
+        let params = test_params(1);
+        for capacity in [1usize, 2, 3, DATASET_CACHE_CAPACITY] {
+            for cycle in 0..1_000u64 {
+                let mut cache = DatasetCache::default();
+                let active_key = (params, cycle, [0x5fu8; 32]);
+                let active_dataset = Arc::new(vec![cycle, 0xabad1dea]);
+                let active_fp = dataset_fingerprint(&active_dataset);
+                let inserted = cache.insert_if_absent(active_key, Arc::clone(&active_dataset), 0);
+                assert!(inserted.inserted);
+
+                for slot in 0..(capacity + 4) {
+                    let mut key_bytes = [slot as u8; 32];
+                    key_bytes[31] = cycle as u8;
+                    let key = (params, cycle + slot as u64 + 1, key_bytes);
+                    cache.entries.insert(key, (Arc::new(vec![slot as u64]), 0));
+                    cache.order.push_back(key);
+                    cache.evict_over_capacity_limit(&active_key, capacity);
+                    assert!(cache.contains_key(&active_key));
+                    assert_eq!(dataset_fingerprint(&active_dataset), active_fp);
+                    assert_eq!(cache.order_len(), cache.len());
+                    assert!(cache.len() <= capacity.max(1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dataset_cache_existing_arc_survives_eviction() {
+        let params = test_params(1);
+        let mut cache = DatasetCache::default();
+        let held_key = (params, 0, [0x11u8; 32]);
+        let held = Arc::new(vec![1, 2, 3, 4]);
+        let held_fp = dataset_fingerprint(&held);
+        cache.insert_if_absent(held_key, Arc::clone(&held), 0);
+
+        for i in 0..16u64 {
+            let key = (params, i + 1, [i as u8; 32]);
+            cache.insert_if_absent(key, Arc::new(vec![i]), 0);
+        }
+
+        assert!(!cache.contains_key(&held_key));
+        assert_eq!(dataset_fingerprint(&held), held_fp);
+        assert_eq!(Arc::strong_count(&held), 1);
+    }
+
+    #[test]
+    fn concurrent_same_key_requests_publish_one_dataset() {
+        let params = test_params(1);
+        let prev = [0x77u8; 32];
+        VisionXDataset::clear_cache();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let (dataset, mask) = VisionXDataset::get_cached(&params, &prev, 0);
+                    (dataset, mask)
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.join().unwrap());
+        }
+        let first_fp = dataset_fingerprint(&results[0].0);
+        let first_mask = results[0].1;
+        for (dataset, mask) in results {
+            assert_eq!(mask, first_mask);
+            assert_eq!(dataset_fingerprint(&dataset), first_fp);
+        }
+    }
+
+    #[test]
+    fn concurrent_different_keys_and_params_remain_separated() {
+        VisionXDataset::clear_cache();
+        let params_a = test_params(1);
+        let params_b = VisionXParams {
+            reads_per_iter: 3,
+            ..test_params(1)
+        };
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let params = if i % 2 == 0 { params_a } else { params_b };
+                    let prev = [i; 32];
+                    let (dataset, mask) = VisionXDataset::get_cached(&params, &prev, i as u64);
+                    (params, i as u64, prev, mask, dataset_fingerprint(&dataset))
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.join().unwrap());
+        }
+        for (params, epoch, prev, mask, fingerprint) in results {
+            let fresh = VisionXDataset::build(&params, &prev, epoch);
+            assert_eq!(mask, fresh.mask);
+            assert_eq!(fingerprint, dataset_fingerprint(&fresh.mem));
+        }
+    }
+    #[test]
+    fn parameter_transition_pressure_does_not_contaminate_production_digest() {
+        let production_header = BlockHeader {
+            parent_hash: "5fda6c3a856383a95cba600f9385de079b3f8c54091c8e13c8541c651b53768f"
+                .to_string(),
+            number: 4,
+            timestamp: 120,
+            difficulty: 1,
+            nonce: 212,
+            pow_hash: "65e812950b8cec99df530d77830a7dd58dbc7d130759081fd87bb47053419e3c"
+                .to_string(),
+            state_root: "263f9888cd69a4702c48c7611e46b4a0ec3b2eb446fab18eb8438d04b8b2f411"
+                .to_string(),
+            tx_root: "476be65f1b58cac52a0a41338a4c5c27ac7bb246c3b1bcc8073e10a337fd53fa".to_string(),
+            miner: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        };
+        let expected: [u8; 32] = hex::decode(&production_header.pow_hash)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let production_parent: [u8; 32] = hex::decode(&production_header.parent_hash)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let small = test_params(1);
+        let alternate = VisionXParams {
+            reads_per_iter: 3,
+            ..test_params(1)
+        };
+
+        VisionXDataset::clear_cache();
+        for cycle in 0..1_000u64 {
+            let small_parent = if cycle % 2 == 0 {
+                production_parent
+            } else {
+                [cycle as u8; 32]
+            };
+            let (small_dataset, small_mask) = VisionXDataset::get_cached(&small, &small_parent, 0);
+            let (alternate_dataset, alternate_mask) =
+                VisionXDataset::get_cached(&alternate, &small_parent, 0);
+            assert!(!Arc::ptr_eq(&small_dataset, &alternate_dataset));
+            assert_eq!(small_mask, VisionXDataset::build(&small, &small_parent, 0).mask);
+            assert_eq!(
+                alternate_mask,
+                VisionXDataset::build(&alternate, &small_parent, 0).mask
+            );
+
+            for slot in 0..6u64 {
+                let churn_params = if slot % 2 == 0 { small } else { alternate };
+                let mut churn_parent = [slot as u8; 32];
+                churn_parent[31] = cycle as u8;
+                let _ = VisionXDataset::get_cached(&churn_params, &churn_parent, cycle + slot + 1);
+            }
+
+            if cycle % 250 == 0 {
+                let digest = historical_block_digest(&VISIONX_PARAMS, 0, &production_header).unwrap();
+                assert_eq!(digest, expected, "production digest changed at cycle {cycle}");
+            }
+
+            let cache = DATASET_CACHE.lock().unwrap();
+            assert_cache_invariants(&cache);
+            assert!(cache.len() <= DATASET_CACHE_CAPACITY);
+        }
+
+        VisionXDataset::clear_cache();
+        let rebuilt = historical_block_digest(&VISIONX_PARAMS, 0, &production_header).unwrap();
+        assert_eq!(rebuilt, expected);
+    }
+
+    #[test]
+    fn historical_block_digest_is_deterministic_for_identical_input() {
+        VisionXDataset::clear_cache();
+        let header = BlockHeader {
+            parent_hash: "5fda6c3a856383a95cba600f9385de079b3f8c54091c8e13c8541c651b53768f"
+                .to_string(),
+            number: 4,
+            timestamp: 120,
+            difficulty: 1,
+            nonce: 212,
+            pow_hash: "65e812950b8cec99df530d77830a7dd58dbc7d130759081fd87bb47053419e3c"
+                .to_string(),
+            state_root: "263f9888cd69a4702c48c7611e46b4a0ec3b2eb446fab18eb8438d04b8b2f411"
+                .to_string(),
+            tx_root: "476be65f1b58cac52a0a41338a4c5c27ac7bb246c3b1bcc8073e10a337fd53fa".to_string(),
+            miner: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        };
+        let expected: [u8; 32] = hex::decode(&header.pow_hash).unwrap().try_into().unwrap();
+        let first = historical_block_digest(&VISIONX_PARAMS, 0, &header).unwrap();
+        assert_eq!(first, expected);
+
+        let iterations = std::env::var("VISION_POW_DIAGNOSTIC_DIGEST_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(64);
+        for i in 0..iterations {
+            let digest = historical_block_digest(&VISIONX_PARAMS, 0, &header).unwrap();
+            assert_eq!(digest, first, "digest changed at iteration {i}");
+        }
+
+        for i in 0..128u64 {
+            let churn_prev = [i as u8; 32];
+            let _ = VisionXDataset::get_cached(&VISIONX_PARAMS, &churn_prev, i + 1);
+        }
+        let after_eviction = historical_block_digest(&VISIONX_PARAMS, 0, &header).unwrap();
+        assert_eq!(after_eviction, first);
+
+        VisionXDataset::clear_cache();
+        let rebuilt = historical_block_digest(&VISIONX_PARAMS, 0, &header).unwrap();
+        assert_eq!(rebuilt, first);
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let header = header.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..32 {
+                    let digest = historical_block_digest(&VISIONX_PARAMS, 0, &header).unwrap();
+                    assert_eq!(digest, expected);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
     #[test]
     fn visionx_hash_small_params_is_deterministic() {
