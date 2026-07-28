@@ -521,6 +521,14 @@ mod tests {
         replies: Vec<BlockReply>,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        spawn_scripted_peer_on(listener, blocks, replies)
+    }
+
+    fn spawn_scripted_peer_on(
+        listener: TcpListener,
+        blocks: Vec<Block>,
+        replies: Vec<BlockReply>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1014,9 +1022,24 @@ mod tests {
     async fn watchdog_recovers_with_valid_peer_after_malicious_peer_fails() {
         let mut malicious_blocks = build_blocks(6, None);
         malicious_blocks[1].header.state_root = "ff".repeat(32);
-        let (malicious_addr, malicious_task) = spawn_mock_peer(malicious_blocks.clone()).await;
         let valid_blocks = build_blocks(6, None);
-        let (valid_addr, valid_task) = spawn_mock_peer(valid_blocks.clone()).await;
+
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first_listener.local_addr().unwrap();
+        let second_addr = second_listener.local_addr().unwrap();
+        let ((malicious_addr, malicious_task), (valid_addr, valid_task)) =
+            if first_addr.to_string() < second_addr.to_string() {
+                (
+                    spawn_scripted_peer_on(first_listener, malicious_blocks.clone(), vec![]),
+                    spawn_scripted_peer_on(second_listener, valid_blocks.clone(), vec![]),
+                )
+            } else {
+                (
+                    spawn_scripted_peer_on(second_listener, malicious_blocks.clone(), vec![]),
+                    spawn_scripted_peer_on(first_listener, valid_blocks.clone(), vec![]),
+                )
+            };
 
         let local_chain = seeded_chain(&valid_blocks);
         let chain = Arc::new(Mutex::new(local_chain));
@@ -1032,6 +1055,13 @@ mod tests {
         pm.set_state(&valid_peer, PeerState::Connected);
         pm.note_peer_height(&valid_peer, 6, false);
 
+        assert_eq!(pm.peer_summary(&malicious_peer).unwrap().height, 6);
+        assert_eq!(pm.peer_summary(&valid_peer).unwrap().height, 6);
+        assert_eq!(
+            pm.best_sync_target(1).as_deref(),
+            Some(malicious_peer.as_str())
+        );
+
         let conn_mgr = P2PConnectionManager::new(
             "127.0.0.1:19109".parse().unwrap(),
             chain.clone(),
@@ -1045,11 +1075,20 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(first.is_err());
+        let first_error = first.expect_err("malicious peer data must be rejected");
+        assert!(first_error.to_string().contains("sync import rejected"));
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 1);
+        assert_eq!(g.tip_hash(), valid_blocks[0].hash());
+        drop(g);
 
         guard.reset();
         pm.set_state(&malicious_peer, PeerState::Disconnected);
         pm.note_peer_height(&valid_peer, 6, false);
+        assert_eq!(
+            pm.best_sync_target(1).as_deref(),
+            Some(valid_peer.as_str())
+        );
 
         let second = timeout(
             Duration::from_secs(5),
