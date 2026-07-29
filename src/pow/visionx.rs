@@ -690,7 +690,7 @@ mod tests {
 
         assert_eq!(a.mem, b.mem);
         assert_eq!(a.mask, b.mask);
-        assert!(a.mem.len() > 0);
+        assert!(!a.mem.is_empty());
         assert_eq!(a.mem.len() & a.mask, 0);
     }
 

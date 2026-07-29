@@ -441,8 +441,8 @@ mod tests {
         assert_eq!(snapshot.cached_state_root, Some(expected_state_root));
         assert_eq!(snapshot.mempool_size, 2);
         assert_eq!(snapshot.peer_count, 1);
-        assert_eq!(snapshot.mining.available, true);
-        assert_eq!(snapshot.mining.active, false);
+        assert!(snapshot.mining.available);
+        assert!(!snapshot.mining.active);
         assert_eq!(snapshot.mining.blocks_found, 0);
         assert_eq!(snapshot.mining.recovery_state, "normal");
         assert_eq!(snapshot.mining.paused_reason, None);

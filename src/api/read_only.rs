@@ -296,9 +296,9 @@ mod tests {
         assert_eq!(balance_status, StatusCode::OK);
         assert_eq!(nonce_status, StatusCode::OK);
         assert_eq!(balance.balance, 9_999);
-        assert_eq!(balance.exists, true);
+        assert!(balance.exists);
         assert_eq!(nonce.nonce, 4);
-        assert_eq!(nonce.exists, true);
+        assert!(nonce.exists);
     }
 
     #[tokio::test]

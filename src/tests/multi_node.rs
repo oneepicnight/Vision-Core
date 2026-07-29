@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(result, AcceptResult::CanonExtension { height });
         {
             let guard = chain.lock().await;
-            crate::chain::storage::store_height_index(&guard, height, &block.hash())?;
+            crate::chain::storage::store_height_index(&guard, height, block.hash())?;
         }
 
         Ok(block)
@@ -564,7 +564,7 @@ mod tests {
         };
         {
             let guard = miner.chain.lock().await;
-            crate::chain::storage::store_height_index(&guard, 1, &funding_block.hash())?;
+            crate::chain::storage::store_height_index(&guard, 1, funding_block.hash())?;
         }
 
         for height in 2..=4 {
@@ -614,7 +614,9 @@ mod tests {
             apply_block(&mut guard, &block, None)
         };
         assert_eq!(result, AcceptResult::CanonExtension { height: 5 });
-        miner.mempool.remove_confirmed(&[transfer_id.clone()]);
+        miner
+            .mempool
+            .remove_confirmed(std::slice::from_ref(&transfer_id));
         let txs = block.txs;
         assert_eq!(txs.len(), 2);
         let follower_peer = miner.addr.to_string();
@@ -757,10 +759,12 @@ mod tests {
         assert_eq!(result, AcceptResult::CanonExtension { height: 32 });
         {
             let guard = miner.chain.lock().await;
-            crate::chain::storage::store_height_index(&guard, 32, &block.hash())?;
+            crate::chain::storage::store_height_index(&guard, 32, block.hash())?;
         }
 
-        miner.mempool.remove_confirmed(&[transfer_id.clone()]);
+        miner
+            .mempool
+            .remove_confirmed(std::slice::from_ref(&transfer_id));
 
         let expected_snapshot = node_snapshot(&miner, &sender, &recipient).await;
         assert_eq!(expected_snapshot.4, 897u128);
@@ -822,7 +826,7 @@ mod tests {
             tx_id: "aa".repeat(32),
             submitted_at: "2026-07-13T00:00:00Z".to_string(),
         };
-        persist_tx_records(&path, &[first.clone()])?;
+        persist_tx_records(&path, std::slice::from_ref(&first))?;
 
         let simulated_late_failure =
             Err::<(), _>(anyhow!("later stage failed after submission was recorded"));
@@ -1005,7 +1009,9 @@ mod tests {
             apply_block(&mut guard, &block, None)
         };
         assert_eq!(result, AcceptResult::CanonExtension { height: 5 });
-        miner.mempool.remove_confirmed(&[transfer_id.clone()]);
+        miner
+            .mempool
+            .remove_confirmed(std::slice::from_ref(&transfer_id));
         assert_eq!(block.txs.len(), 2);
 
         let miner_peer = miner.addr.to_string();
