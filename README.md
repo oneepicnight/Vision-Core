@@ -120,7 +120,9 @@ At the v1.0.4 baseline, one test,
 `node::bootstrap::tests::bootstrap_recovery_worker`, is intentionally ignored.
 Formatting is clean and enforced as a blocking check. Compiler and Clippy
 warning counts are recorded in the
-[quality baseline](docs/QUALITY_BASELINE.md); Clippy remains non-blocking while
+[Tranche 2 quality baseline](docs/QUALITY_BASELINE.md). The current
+post-cleanup counts are maintained in
+[Current Status](docs/CURRENT_STATUS.md). Clippy remains non-blocking while
 that debt is classified.
 
 ## Continuous integration

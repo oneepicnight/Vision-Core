@@ -6,6 +6,18 @@ the Vision-Core v1.0.4 formatting and warning-baseline tranche.
 It is an audit, not deletion authorization. No item may be removed solely
 because the compiler calls it unused.
 
+The classifications record the Tranche 3 audit state. Four approved
+dispositions were subsequently completed:
+
+- `NODE-02`: obsolete `block_root` test helper removed by `8dcab2b`;
+- `TEST-01`: unused `NodeHarness::api_addr` removed by `56e923d`;
+- `CHAIN-04`: missing `#[test]` restored by `d63c7d0`;
+- `CHAIN-05`: four unread, non-persisted ChainState mempool fields removed by
+  `b83240d` after the dedicated state-model audit.
+
+Those resolved entries remain in the ledger as historical evidence and are not
+part of the frozen remaining-item set.
+
 ## Classification rules
 
 - **Obsolete**: evidence indicates that the item has been superseded or is an
@@ -47,8 +59,8 @@ boundary.
 | CHAIN-01 | `AcceptResult::is_accepted` | `src/chain/accept.rs` | Near-term planned API | Consensus-adjacent | Convenience method on the public acceptance result. Retain until the Rust API boundary is decided. |
 | CHAIN-02 | `POW_PREVALIDATION_CACHE`, `mark_pow_prevalidated`, `is_pow_prevalidated`, `verify_pow_only` | `src/chain/accept.rs` | Test support | Consensus-critical PoW | The entry point and cache helpers are exercised by acceptance-security tests but not the runtime path. Removal would discard characterization of prevalidation safety; review as one unit. |
 | CHAIN-03 | `cumulative_work` | `src/chain/reorg.rs` | Test support | Consensus-critical fork choice | Queried by reorg tests. Keep until tests are rewritten around a supported query or direct state inspection. |
-| CHAIN-04 | `cumulative_work_single_block` | `src/chain/reorg.rs` | Obsolete | Test infrastructure | An uncalled test-shaped function. Confirm whether a missing `#[test]` was intentional before deleting or restoring it. |
-| CHAIN-05 | `mempool_critical`, `mempool_bulk`, `mempool_ts`, `mempool_height` | `src/chain/state.rs` | Obsolete | Consensus-adjacent state model | Initialized but never read; the active `Mempool` is separate. Before deletion, audit persisted representations, snapshots, reorg recovery, and downstream consumers. |
+| CHAIN-04 | `cumulative_work_single_block` | `src/chain/reorg.rs` | Obsolete—resolved | Test infrastructure | The audit identified a missing test annotation. `#[test]` was restored in `d63c7d0`; the test now participates in the suite. |
+| CHAIN-05 | `mempool_critical`, `mempool_bulk`, `mempool_ts`, `mempool_height` | `src/chain/state.rs` | Obsolete—resolved | Consensus-adjacent state model | Removed in `b83240d` after persistence, restart, reorg, snapshot, and state-root review showed the fields were unread and non-persisted. |
 | CHAIN-06 | `seen_txs` | `src/chain/state.rs` | Uncertain | P2P/transaction policy | Documented as gossip deduplication but unused. Decide whether deduplication belongs in `ChainState`, `Mempool`, or P2P before removal. |
 | CHAIN-07 | `ChainState::open` | `src/chain/state.rs` | Test support | Persistence-sensitive | Used only by tests/legacy construction; runtime uses `open_with_genesis`. Retain until startup and recovery construction paths are consolidated. |
 | CHAIN-08 | `ChainState::block_at` | `src/chain/state.rs` | Near-term planned API | Chain query | A natural read API with tests. Decide library/API visibility before removal. |
@@ -90,7 +102,7 @@ boundary.
 | ID | Symbols | Classification | Sensitivity | Evidence and disposition |
 | --- | --- | --- | --- | --- |
 | NODE-01 | `RecoveryState::mode` | Near-term planned API | Recovery policy | Read accessor for recovery state; likely diagnostic/API boundary. |
-| NODE-02 | test helper `block_root` | Obsolete | Test infrastructure | Uncalled helper inside bootstrap tests. Verify no ignored recovery test was intended to use it before deletion. |
+| NODE-02 | test helper `block_root` | Obsolete—resolved | Test infrastructure | Removed in `8dcab2b` after focused test-infrastructure review. |
 | P2P-01 | `PeerState::Connecting` | Near-term planned API | P2P state machine | Declared state not constructed. Decide whether outbound dialing needs an explicit connecting state. |
 | P2P-02 | `PeerManager::outbound_count`, `snapshot` | Near-term planned API | P2P diagnostics | Query methods suitable for connection management and API status. |
 | P2P-03 | `PeerManager::note_observed_addr` | Test support | Peer identity/security | Covered in tests but unused by runtime. Compare with advertised-identity handling before removal. |
@@ -108,7 +120,7 @@ boundary.
 | POW-04 | `PowJob::new`, `PowSolution::new` | Near-term planned API | Mining/PoW | Constructors for exported mining types. Decide external miner interface before removal. |
 | POW-05 | `VisionXMiner::params`, `build_job`, `mine` | Near-term planned API | Consensus-critical PoW | Complete alternate mining interface with tests. Requires equivalence review against active mining before consolidation. |
 | TX-01 | `Tx::tx_id` | Test support | Consensus-critical transaction identity | Legacy/convenience identifier used by tests while production prefers `canonical_tx_id`. Removal requires proving both semantics and updating identity vectors deliberately. |
-| TEST-01 | `NodeHarness::api_addr` | Obsolete | Test infrastructure | Stored but never read in multi-node tests. Can be considered for a test-only cleanup after confirming no pending API convergence test needs it. |
+| TEST-01 | `NodeHarness::api_addr` | Obsolete—resolved | Test infrastructure | Removed in `56e923d` after confirming no active convergence test consumed it. |
 
 ## Classification summary
 
@@ -120,8 +132,10 @@ boundary.
 | Dormant consensus/protocol feature | 13 |
 | Uncertain | 2 |
 
-Counts are ledger entries, not individual Rust symbols; related symbols are
-grouped where they must be reviewed together.
+Counts are the original classification totals, not current unresolved totals
+and not individual Rust symbols. Related symbols are grouped where they must be
+reviewed together. Four obsolete entries are now resolved as recorded above;
+all other entries remain frozen pending their documented decisions.
 
 ## Recommended sequence
 
@@ -130,10 +144,8 @@ grouped where they must be reviewed together.
    are roadmap commitments or historical records.
 3. Separate component tests from runtime APIs using explicit test-support
    modules where behavior is already covered.
-4. Review only the four obsolete entries for possible test-only or structural
-   removal.
-5. Make each accepted removal an isolated commit and rerun the focused tests
-   plus the complete single-threaded release suite.
+4. Treat the four resolved obsolete entries as closed historical audit items.
+5. Require new owner authorization before acting on any remaining entry.
 
 Configuration hardening must handle parsed-but-unused settings and declared but
 unenforced policies as behavior changes with migration notes; this ledger does

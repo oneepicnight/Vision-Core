@@ -3,23 +3,21 @@
 This document records the developer-quality baseline established in Tranche 2
 on the currently validated Rust 1.97.1 toolchain.
 
-## Policy
+This is a historical tranche baseline, not the current warning total. Approved
+Tranche 3 cleanup reduced the test-target compiler summary from 34 to 31 while
+the normal-target summary remained 58. The reason and current counts are
+maintained in [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
-- `cargo fmt --all -- --check` must pass. Formatting is a blocking CI gate.
-- `cargo check --all-targets --locked` must complete successfully.
-- `cargo test --release --locked -- --test-threads=1` must complete with only
-  the documented ignored test.
-- `cargo clippy --all-targets --locked` must complete successfully, but remains
-  a non-blocking CI debt report until the findings below are classified and
-  resolved.
-- New or modified code must not add compiler or Clippy warnings.
-- Do not suppress a repository warning merely to improve the count.
-- Do not delete a dead item until the Tranche 3 dead-code ledger classifies it.
-- Consensus-sensitive lint changes require the same isolation and validation as
-  any other consensus-sensitive edit.
+## Policy Authority
 
-Use `--offline` with these commands when the declared toolchain and locked
-dependencies are already cached.
+This document records historical measurements. Current validation rules are
+defined in [TESTING_POLICY.md](TESTING_POLICY.md), coding and warning rules in
+[CODING_STANDARDS.md](CODING_STANDARDS.md), and unused-code dispositions in
+[DEAD_CODE_LEDGER.md](DEAD_CODE_LEDGER.md).
+
+The commands below were the commands used to establish Tranche 2. They are
+evidence, not a second validation policy. `--offline` was used because the
+pinned toolchain and locked dependencies were cached.
 
 ## Established results
 
@@ -63,7 +61,7 @@ and test expressions. Several occur in consensus-sensitive modules. They remain
 unchanged so a formatting/warning tranche cannot silently alter consensus,
 serialization, PoW, VisionX, chain-state, or P2P behavior.
 
-## Comparing future changes
+## Comparing later changes
 
 Run the commands above on the branch base and on the proposed change using the
 same Rust toolchain. A pull request should identify:
