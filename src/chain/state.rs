@@ -1,7 +1,7 @@
 use crate::chain::reorg::ReorgRecovery;
 use crate::chain::storage::load_meta;
 use crate::config::constants::*;
-use crate::types::{Block, Tx};
+use crate::types::Block;
 use sled::Db;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -22,19 +22,6 @@ pub struct ChainState {
 
     /// Current LWMA-adjusted difficulty for the next block.
     pub difficulty: u64,
-
-    // ─── Mempool ──────────────────────────────────────────────────────────────
-    /// High-priority transactions (ordered by insertion).
-    pub mempool_critical: indexmap::IndexMap<String, Tx>,
-
-    /// Standard-priority transactions.
-    pub mempool_bulk: indexmap::IndexMap<String, Tx>,
-
-    /// Insertion timestamp per tx_id (unix seconds).
-    pub mempool_ts: BTreeMap<String, u64>,
-
-    /// Block height at which each tx entered the mempool.
-    pub mempool_height: BTreeMap<String, u64>,
 
     // ─── Account state ────────────────────────────────────────────────────────
     /// Token balances keyed by address (raw units, saturating at u128::MAX).
@@ -123,10 +110,6 @@ impl ChainState {
         Self {
             blocks: Vec::new(),
             difficulty: DIFFICULTY_FLOOR,
-            mempool_critical: indexmap::IndexMap::new(),
-            mempool_bulk: indexmap::IndexMap::new(),
-            mempool_ts: BTreeMap::new(),
-            mempool_height: BTreeMap::new(),
             balances: BTreeMap::new(),
             nonces: BTreeMap::new(),
             seen_txs: BTreeSet::new(),
