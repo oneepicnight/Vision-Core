@@ -298,8 +298,6 @@ mod tests {
     fn load_canon_chain_recovers_blocks() {
         // Store genesis + 1 block via storage helpers directly, then recover.
         use crate::chain::accept::apply_block;
-        use crate::config::constants::TARGET_BLOCK_TIME;
-
         // First pass: apply blocks so sled is populated.
         let db1 = sled::Config::new().temporary(true).open().unwrap();
         let mut g = ChainState::empty(db1);

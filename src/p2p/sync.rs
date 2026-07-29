@@ -1,27 +1,20 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use crate::chain::accept::{apply_block, AcceptResult};
 use crate::chain::state::ChainState;
-use crate::config::constants::{
-    DIFFICULTY_FLOOR, STALL_OVERRIDE_SECS, SYNC_CLEAR_JOB_MIN_LAG, SYNC_LAG_THRESHOLD,
-    TARGET_BLOCK_TIME,
-};
-use crate::genesis::genesis_block;
+use crate::config::constants::{STALL_OVERRIDE_SECS, SYNC_CLEAR_JOB_MIN_LAG, SYNC_LAG_THRESHOLD};
 use crate::mempool::Mempool;
 use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::PeerManager;
 use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
-use crate::types::Block;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncDecision {
@@ -437,10 +430,17 @@ pub async fn watchdog_step(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, VecDeque};
+
     use super::*;
     use crate::chain::accept::{apply_block, tests_helpers::make_test_block};
+    use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
+    use crate::genesis::genesis_block;
     use crate::p2p::peer_manager::PeerState;
     use crate::p2p::protocol::HandshakeMessage;
+    use crate::types::Block;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};
 
     fn temp_state() -> ChainState {

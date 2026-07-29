@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::chain::accept::tests_helpers::make_test_block;
     use crate::chain::accept::AcceptResult;
-    use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
+    use crate::config::constants::TARGET_BLOCK_TIME;
     use crate::genesis::genesis_block;
     use crate::pow::visionx::VISIONX_PARAMS;
 

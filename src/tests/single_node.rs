@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use crate::chain::accept::verify_pow_only;
     use crate::genesis::genesis::{genesis_block, validate_genesis_hash};
 
     #[test]

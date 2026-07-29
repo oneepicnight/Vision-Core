@@ -28,7 +28,7 @@ use crate::miner::block_reward;
 use crate::pow::difficulty::{calculate_next_difficulty, difficulty_to_target};
 use crate::pow::historical_vpow::historical_vpow_message_bytes_with_nonce_zero;
 use crate::pow::visionx::historical_block_digest;
-use crate::types::transaction::{canonical_tx_id, simulate_tx_execution, TxExecutionState};
+use crate::types::transaction::{simulate_tx_execution, TxExecutionState};
 use crate::types::Block;
 
 pub(crate) fn apply_coinbase_reward(
@@ -692,7 +692,7 @@ pub mod tests_helpers {
     use crate::config::constants::DIFFICULTY_FLOOR;
     use crate::pow::visionx::historical_block_digest;
     use crate::pow::VISIONX_PARAMS;
-    use crate::types::transaction::{simulate_tx_execution, TxExecutionState};
+    use crate::types::transaction::TxExecutionState;
     use crate::types::{Block, BlockHeader, Tx};
 
     /// Build a coinbase transaction encoding `height` as 8-byte big-endian.

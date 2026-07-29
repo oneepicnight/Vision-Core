@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 
 use crate::chain::accept::{apply_block, AcceptResult};
-use crate::chain::snapshots::{restore_latest_snapshot, save_snapshot};
+use crate::chain::snapshots::restore_latest_snapshot;
 use crate::chain::storage::{
     load_block, load_height_index, load_meta, store_block, store_height_index, store_meta,
 };
@@ -224,6 +224,7 @@ pub fn seed_peers(settings: &Settings) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::chain::accept::tests_helpers::make_test_block;
+    use crate::chain::snapshots::save_snapshot;
     use crate::chain::state::ChainState;
     use crate::config::constants::TARGET_BLOCK_TIME;
     use crate::genesis::genesis_block;
@@ -416,7 +417,7 @@ mod tests {
         let _ = build_chain_with_snapshot(recovery_dir.path(), 64, 66)?;
         std::thread::sleep(std::time::Duration::from_millis(2000));
 
-        let mut chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
+        let chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
         chain.db.remove(b"height:65")?;
         drop(chain);
 
@@ -430,7 +431,7 @@ mod tests {
         let _ = build_chain_with_snapshot(recovery_dir.path(), 64, 66)?;
         std::thread::sleep(std::time::Duration::from_millis(2000));
 
-        let mut chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
+        let chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
         let block_65_hash = chain.db.get(b"height:65")?.unwrap();
         let block_65_hash = String::from_utf8(block_65_hash.to_vec())?;
         let mut block_65 =
@@ -450,7 +451,7 @@ mod tests {
             build_chain_with_snapshot(recovery_dir.path(), 64, 66)?;
         std::thread::sleep(std::time::Duration::from_millis(2000));
 
-        let mut chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
+        let chain = ChainState::open_with_genesis(&recovery_dir.path().display().to_string())?;
         let parent_hash = chain.db.get(b"height:64")?.unwrap();
         let parent_hash = String::from_utf8(parent_hash.to_vec())?;
         let side_block = make_test_block(

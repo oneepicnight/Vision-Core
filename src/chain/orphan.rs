@@ -1,6 +1,5 @@
 use crate::chain::ChainState;
 use crate::config::constants::ORPHAN_POOL_MAX;
-use crate::types::transaction::canonical_tx_id;
 use crate::types::Block;
 
 /// Move any orphaned blocks whose expected parent has now arrived into the
@@ -91,11 +90,12 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::accept::apply_block;
     use crate::chain::accept::tests_helpers::make_test_block;
-    use crate::chain::accept::{apply_block, AcceptResult};
     use crate::chain::state::ChainState;
     use crate::config::constants::TARGET_BLOCK_TIME;
     use crate::genesis::genesis_block;
+    use crate::types::transaction::canonical_tx_id;
     use crate::types::{Block, BlockHeader, Tx};
 
     fn temp_state() -> ChainState {

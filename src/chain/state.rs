@@ -233,7 +233,7 @@ impl ChainState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::accept::{apply_block, AcceptResult};
+    use crate::chain::accept::apply_block;
     use crate::genesis::genesis_block;
 
     fn temp_state() -> ChainState {
