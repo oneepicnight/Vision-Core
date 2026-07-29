@@ -530,12 +530,4 @@ mod tests {
         std::fs::write(output_file, output)?;
         Ok(())
     }
-
-    fn block_root(chain: &ChainState) -> String {
-        chain
-            .blocks
-            .last()
-            .map(|b| b.header.state_root.clone())
-            .unwrap_or_default()
-    }
 }
