@@ -36,10 +36,11 @@ also run its narrowest applicable test target before the full suite.
 
 ## Formatting and lint
 
-New work should be formatted and should not introduce new warnings. The v1.0.4
-baseline contains known formatting and Clippy debt, so compare results against
-the documented baseline rather than hiding failures. Repository-wide formatting
-belongs in its own tranche and commit.
+New work must be formatted and must not introduce new warnings. Formatting is a
+blocking CI gate. Clippy remains a visible, non-blocking debt report while its
+findings are classified. Compare results against
+[`docs/QUALITY_BASELINE.md`](docs/QUALITY_BASELINE.md) rather than hiding or
+suppressing failures.
 
 ## Consensus-sensitive review
 

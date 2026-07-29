@@ -118,16 +118,18 @@ cargo clippy --all-targets --locked
 
 At the v1.0.4 baseline, one test,
 `node::bootstrap::tests::bootstrap_recovery_worker`, is intentionally ignored.
-Formatting and Clippy are known debt checks and are non-blocking in the initial
-CI baseline; their failures remain visible.
+Formatting is clean and enforced as a blocking check. Compiler and Clippy
+warning counts are recorded in the
+[quality baseline](docs/QUALITY_BASELINE.md); Clippy remains non-blocking while
+that debt is classified.
 
 ## Continuous integration
 
 CI runs for pushes to `main` and pull requests targeting `main`.
 
-- Build/check and the single-threaded release suite are blocking.
-- Formatting and Clippy run as explicitly named non-blocking debt-reporting
-  jobs until Tranche 2 establishes clean baselines.
+- Build/check, formatting, and the single-threaded release suite are blocking.
+- Clippy runs as an explicitly named non-blocking baseline-reporting job; its
+  findings are documented and remain visible.
 
 ## Consensus-sensitive changes
 
