@@ -13,8 +13,12 @@
 
 // â”€â”€â”€ Identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// [POLICY] Human-readable version shown in the startup banner and handshake.
-pub const NODE_VERSION: &str = "v0.1.0";
+/// [POLICY] Human-readable package release shown in diagnostics.
+///
+/// This is derived from Cargo package metadata so the runtime banner, status
+/// endpoint, and diagnostic handshake tag cannot drift from `Cargo.toml`.
+/// It does not control protocol or consensus compatibility.
+pub const NODE_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// [CONSENSUS] Wire protocol version. Peers that send a different value are
 /// rejected immediately during handshake.
@@ -248,6 +252,12 @@ pub const DEFAULT_SEED_PEERS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_version_matches_package_metadata() {
+        assert_eq!(NODE_VERSION, concat!("v", env!("CARGO_PKG_VERSION")));
+        assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.4");
+    }
 
     #[test]
     fn protocol_version_is_nonzero() {

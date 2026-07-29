@@ -68,7 +68,7 @@ pub struct HandshakeMessage {
     /// Network name string (e.g. `"mainnet"`).
     pub network_id: String,
 
-    /// Human-readable version tag for diagnostics only (e.g. `"v0.1.0-consensus-v1.0.3"`).
+    /// Human-readable version tag for diagnostics only (e.g. `"v1.0.4-consensus-v1.0.3"`).
     pub node_tag: String,
 
     /// Economics fingerprint â€” must match `ECON_HASH` on all nodes to prevent
