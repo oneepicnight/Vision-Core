@@ -820,6 +820,7 @@ mod tests {
             Err(SideStateReconstructionError::BrokenAncestry { .. })
         ));
     }
+    #[test]
     fn cumulative_work_single_block() {
         let (g, blocks) = build_chain(0);
         let gen = &blocks[0];
