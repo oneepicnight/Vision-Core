@@ -42,6 +42,11 @@ findings are classified. Compare results against
 [`docs/QUALITY_BASELINE.md`](docs/QUALITY_BASELINE.md) rather than hiding or
 suppressing failures.
 
+Before removing an unused item, consult
+[`docs/DEAD_CODE_LEDGER.md`](docs/DEAD_CODE_LEDGER.md). A compiler warning is
+not deletion authorization, especially for public façades, test
+characterization helpers, and dormant consensus or protocol features.
+
 ## Consensus-sensitive review
 
 Read `docs/CONSENSUS_CHANGE_POLICY.md` before modifying block encoding, PoW,

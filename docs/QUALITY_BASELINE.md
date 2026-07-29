@@ -75,3 +75,6 @@ same Rust toolchain. A pull request should identify:
 
 The warning counts may decrease only through reviewed changes. A lower count is
 not, by itself, authorization to remove code.
+
+The Tranche 3 classification and deletion prerequisites are maintained in the
+[dead-code classification ledger](DEAD_CODE_LEDGER.md).
