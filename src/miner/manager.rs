@@ -171,16 +171,13 @@ impl MinerManager {
             self.params,
         );
 
-        let mut state = TxExecutionState::from_balances_and_nonces(
-            g.balances.clone(),
-            g.nonces.clone(),
-        );
+        let mut state =
+            TxExecutionState::from_balances_and_nonces(g.balances.clone(), g.nonces.clone());
         for tx in job.txs.iter().skip(1) {
             simulate_tx_execution(&mut state, tx).ok()?;
         }
         apply_coinbase_reward(&mut state, miner_addr, tip.header.number + 1).ok()?;
-        job.header_template.state_root =
-            compute_state_root(&state.balances, &state.nonces).ok()?;
+        job.header_template.state_root = compute_state_root(&state.balances, &state.nonces).ok()?;
         job.header_bytes = MiningJob::encode_header(&job.header_template);
         Some(job)
     }
@@ -254,7 +251,9 @@ mod tests {
     fn build_candidate_has_correct_parent_and_height() {
         let m = default_manager();
         let g = seeded_state();
-        let job = m.build_candidate_for_tip(&g, &"22".repeat(32), vec![]).unwrap();
+        let job = m
+            .build_candidate_for_tip(&g, &"22".repeat(32), vec![])
+            .unwrap();
         let gen = genesis_block();
         assert_eq!(job.header_template.number, 1);
         assert_eq!(job.header_template.parent_hash, gen.hash());
@@ -385,8 +384,13 @@ mod tests {
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
         let blk = make_test_block(gen.hash(), 1, ts, 0xAD);
 
-        assert_eq!(m.submit_solution(&mut g, blk.clone()), AcceptResult::CanonExtension { height: 1 });
-        assert_eq!(g.cached_state_root, Some((1, blk.header.state_root.clone())));
+        assert_eq!(
+            m.submit_solution(&mut g, blk.clone()),
+            AcceptResult::CanonExtension { height: 1 }
+        );
+        assert_eq!(
+            g.cached_state_root,
+            Some((1, blk.header.state_root.clone()))
+        );
     }
-
 }

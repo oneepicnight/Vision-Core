@@ -35,14 +35,21 @@ pub struct MempoolAdmission<'a> {
 
 impl<'a> MempoolAdmission<'a> {
     pub fn new(current_nonce: u64, pending: &'a [Tx]) -> Self {
-        Self { current_nonce, pending }
+        Self {
+            current_nonce,
+            pending,
+        }
     }
 
     pub fn evaluate(&self, tx: &Tx) -> Result<AdmissionDecision, MempoolAdmissionError> {
         validate_tx_stateless(tx).map_err(MempoolAdmissionError::StatelessValidation)?;
 
         let tx_id = canonical_tx_id(tx);
-        if self.pending.iter().any(|existing| canonical_tx_id(existing) == tx_id) {
+        if self
+            .pending
+            .iter()
+            .any(|existing| canonical_tx_id(existing) == tx_id)
+        {
             return Err(MempoolAdmissionError::DuplicateCanonicalTxId);
         }
 
@@ -60,11 +67,9 @@ impl<'a> MempoolAdmission<'a> {
             });
         }
 
-        if let Some(existing) = self
-            .pending
-            .iter()
-            .find(|existing| existing.sender_pubkey == tx.sender_pubkey && existing.nonce == tx.nonce)
-        {
+        if let Some(existing) = self.pending.iter().find(|existing| {
+            existing.sender_pubkey == tx.sender_pubkey && existing.nonce == tx.nonce
+        }) {
             if tx.tip > existing.tip {
                 return Ok(AdmissionDecision::Replace {
                     evict_tx_id: canonical_tx_id(existing),

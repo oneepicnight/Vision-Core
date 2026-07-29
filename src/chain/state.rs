@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use sled::Db;
-use crate::chain::storage::load_meta;
-use crate::types::{Block, Tx};
 use crate::chain::reorg::ReorgRecovery;
+use crate::chain::storage::load_meta;
 use crate::config::constants::*;
+use crate::types::{Block, Tx};
+use sled::Db;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Address type alias for clarity.
 pub type Address = String;
@@ -16,7 +16,6 @@ pub type Address = String;
 /// Access is guarded by a `tokio::sync::Mutex<ChainState>` at the node level.
 pub struct ChainState {
     // ─── Canonical chain ──────────────────────────────────────────────────────
-
     /// All canonical blocks in order, index 0 = genesis.
     /// `blocks[i].header.number == i` is an invariant maintained by all callers.
     pub blocks: Vec<Block>,
@@ -25,7 +24,6 @@ pub struct ChainState {
     pub difficulty: u64,
 
     // ─── Mempool ──────────────────────────────────────────────────────────────
-
     /// High-priority transactions (ordered by insertion).
     pub mempool_critical: indexmap::IndexMap<String, Tx>,
 
@@ -39,7 +37,6 @@ pub struct ChainState {
     pub mempool_height: BTreeMap<String, u64>,
 
     // ─── Account state ────────────────────────────────────────────────────────
-
     /// Token balances keyed by address (raw units, saturating at u128::MAX).
     pub balances: BTreeMap<Address, u128>,
 
@@ -47,7 +44,6 @@ pub struct ChainState {
     pub nonces: BTreeMap<Address, u64>,
 
     // ─── Gossip dedup sets ────────────────────────────────────────────────────
-
     /// Hashes of transactions already seen (prevents re-relay).
     pub seen_txs: BTreeSet<String>,
 
@@ -55,7 +51,6 @@ pub struct ChainState {
     pub seen_blocks: BTreeSet<String>,
 
     // ─── Fork / side-chain state ──────────────────────────────────────────────
-
     /// Valid blocks on non-canonical chains.
     /// Key: block.hash(), Value: Block.
     pub side_blocks: BTreeMap<String, Block>,
@@ -65,7 +60,6 @@ pub struct ChainState {
     pub cumulative_work: BTreeMap<String, u128>,
 
     // ─── Orphan pool ──────────────────────────────────────────────────────────
-
     /// Blocks whose parent is not yet known.
     /// Outer key: expected parent_hash; inner Vec: (block, arrival_secs, peer).
     pub orphan_pool: BTreeMap<String, Vec<(Block, u64, String)>>,
@@ -74,7 +68,6 @@ pub struct ChainState {
     pub orphan_by_hash: BTreeMap<String, String>,
 
     // ─── Indexes ──────────────────────────────────────────────────────────────
-
     /// block_hash → canonical height; O(1) ancestor resolution.
     pub canon_index: HashMap<String, u64>,
 
@@ -87,7 +80,6 @@ pub struct ChainState {
     pub pending_reorg_recovery: Option<ReorgRecovery>,
 
     // ─── Persistent storage ───────────────────────────────────────────────────
-
     /// Sled database handle for block and state persistence.
     pub db: Db,
 }
@@ -129,21 +121,21 @@ impl ChainState {
     /// Construct an empty in-memory state backed by `db`.
     pub(crate) fn empty(db: Db) -> Self {
         Self {
-            blocks:            Vec::new(),
-            difficulty:        DIFFICULTY_FLOOR,
-            mempool_critical:  indexmap::IndexMap::new(),
-            mempool_bulk:      indexmap::IndexMap::new(),
-            mempool_ts:        BTreeMap::new(),
-            mempool_height:    BTreeMap::new(),
-            balances:          BTreeMap::new(),
-            nonces:            BTreeMap::new(),
-            seen_txs:          BTreeSet::new(),
-            seen_blocks:       BTreeSet::new(),
-            side_blocks:       BTreeMap::new(),
-            cumulative_work:   BTreeMap::new(),
-            orphan_pool:       BTreeMap::new(),
-            orphan_by_hash:    BTreeMap::new(),
-            canon_index:       HashMap::new(),
+            blocks: Vec::new(),
+            difficulty: DIFFICULTY_FLOOR,
+            mempool_critical: indexmap::IndexMap::new(),
+            mempool_bulk: indexmap::IndexMap::new(),
+            mempool_ts: BTreeMap::new(),
+            mempool_height: BTreeMap::new(),
+            balances: BTreeMap::new(),
+            nonces: BTreeMap::new(),
+            seen_txs: BTreeSet::new(),
+            seen_blocks: BTreeSet::new(),
+            side_blocks: BTreeMap::new(),
+            cumulative_work: BTreeMap::new(),
+            orphan_pool: BTreeMap::new(),
+            orphan_by_hash: BTreeMap::new(),
+            canon_index: HashMap::new(),
             cached_state_root: None,
             pending_reorg_recovery: None,
             db,
@@ -197,7 +189,9 @@ impl ChainState {
         if bal < amount {
             return Err(anyhow::anyhow!(
                 "insufficient balance for {}: have {} need {}",
-                address, bal, amount
+                address,
+                bal,
+                amount
             ));
         }
         self.balances.insert(address.to_string(), bal - amount);
@@ -239,8 +233,8 @@ impl ChainState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genesis::genesis_block;
     use crate::chain::accept::{apply_block, AcceptResult};
+    use crate::genesis::genesis_block;
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
@@ -287,10 +281,16 @@ mod tests {
 
         // Build a canonical b1 and a competing b1_prime.
         let b1 = crate::chain::accept::tests_helpers::make_test_block(
-            gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA,
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
         );
         let b1p = crate::chain::accept::tests_helpers::make_test_block(
-            gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAB,
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAB,
         );
         apply_block(&mut g, &b1, None);
         apply_block(&mut g, &b1p, None);
@@ -368,5 +368,4 @@ mod tests {
 
         assert_eq!(g.cached_state_root, Some((1, b1.header.state_root.clone())));
     }
-
 }

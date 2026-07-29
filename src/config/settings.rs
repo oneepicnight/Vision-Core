@@ -41,8 +41,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            data_dir: std::env::var("VISION_DATA_DIR")
-                .unwrap_or_else(|_| "./data".into()),
+            data_dir: std::env::var("VISION_DATA_DIR").unwrap_or_else(|_| "./data".into()),
             http_addr: format!(
                 "0.0.0.0:{}",
                 std::env::var("VISION_HTTP_PORT")
@@ -57,7 +56,9 @@ impl Default for Settings {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(DEFAULT_P2P_PORT)
             ),
-            p2p_advertised_host: parse_optional_string(std::env::var("VISION_P2P_ADVERTISED_HOST").ok()),
+            p2p_advertised_host: parse_optional_string(
+                std::env::var("VISION_P2P_ADVERTISED_HOST").ok(),
+            ),
             p2p_advertised_port: std::env::var("VISION_P2P_ADVERTISED_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
@@ -142,7 +143,9 @@ mod tests {
 
     #[test]
     fn parse_seed_peers_splits_and_trims() {
-        let peers = parse_seed_peers(Some(" 127.0.0.1:7072 , 10.0.0.1:8080;\n192.168.1.1:9000 ".to_string()));
+        let peers = parse_seed_peers(Some(
+            " 127.0.0.1:7072 , 10.0.0.1:8080;\n192.168.1.1:9000 ".to_string(),
+        ));
         assert_eq!(
             peers,
             vec![

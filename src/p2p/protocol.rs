@@ -232,7 +232,6 @@ mod tests {
         assert_eq!(hs.protocol_version, PROTOCOL_VERSION);
     }
 
-
     #[test]
     fn new_with_advertised_sets_peer_identity_fields() {
         let hs = HandshakeMessage::new_with_advertised(

@@ -38,8 +38,12 @@ pub fn difficulty_to_target(difficulty: u64) -> U256 {
 /// # Consensus-critical
 /// Historical `vision-node` semantics compare only the upper 64 bits.
 pub fn verify_pow_hash(hash_hex: &str, difficulty: u64) -> bool {
-    let Ok(hash_bytes) = hex::decode(hash_hex) else { return false };
-    if hash_bytes.len() != 32 { return false; }
+    let Ok(hash_bytes) = hex::decode(hash_hex) else {
+        return false;
+    };
+    if hash_bytes.len() != 32 {
+        return false;
+    }
     let target = difficulty_to_target(difficulty);
     &hash_bytes[0..8] <= &target[0..8]
 }
@@ -104,8 +108,8 @@ pub fn calculate_next_difficulty(blocks: &[Block], now_secs: u64) -> u64 {
             .min(LWMA_MAX_INTERVAL_SECS);
 
         let weight = (i + 1) as u128;
-        weighted_sum  += clamped as u128 * weight;
-        weight_total  += weight;
+        weighted_sum += clamped as u128 * weight;
+        weight_total += weight;
         sum_difficulty += window[i + 1].header.difficulty as u128;
     }
 
@@ -118,9 +122,7 @@ pub fn calculate_next_difficulty(blocks: &[Block], now_secs: u64) -> u64 {
     //   new_diff = avg_diff × target / lwma
     // If blocks are coming too fast (lwma < target) → new_diff > avg_diff → harder.
     // If blocks are coming too slow (lwma > target) → new_diff < avg_diff → easier.
-    let new_diff = avg_difficulty
-        .saturating_mul(TARGET_BLOCK_TIME as u128)
-        / lwma_interval;
+    let new_diff = avg_difficulty.saturating_mul(TARGET_BLOCK_TIME as u128) / lwma_interval;
 
     // Wall-clock stall detection: if no block in STALL_MULTIPLIER × TARGET_BLOCK_TIME
     // seconds, apply emergency downshift so miners can find the next block.
@@ -133,7 +135,10 @@ pub fn calculate_next_difficulty(blocks: &[Block], now_secs: u64) -> u64 {
         let downshifted = new_diff.saturating_mul(3) / 4; // × 0.75
         tracing::warn!(
             "[DIFFICULTY] Stall detected: {}s > {}s threshold, downshift {} → {}",
-            wait_since_last, stall_threshold, new_diff, downshifted
+            wait_since_last,
+            stall_threshold,
+            new_diff,
+            downshifted
         );
         downshifted
     } else {
@@ -165,16 +170,16 @@ mod tests {
         Block {
             header: BlockHeader {
                 parent_hash: "00".repeat(32),
-                number:      height,
+                number: height,
                 timestamp,
                 difficulty,
-                nonce:       0,
-                pow_hash:    "00".repeat(32),
-                state_root:  "00".repeat(32),
-                tx_root:     "0".repeat(64),
-                miner:       "0xtest".to_string(),
+                nonce: 0,
+                pow_hash: "00".repeat(32),
+                state_root: "00".repeat(32),
+                tx_root: "0".repeat(64),
+                miner: "0xtest".to_string(),
             },
-            txs:    vec![],
+            txs: vec![],
             weight: 0,
         }
     }
@@ -216,7 +221,10 @@ mod tests {
         let t10 = difficulty_to_target(10);
         let t100 = difficulty_to_target(100);
         // Lower target = harder = higher difficulty.
-        assert!(t100 < t10, "difficulty=100 must have a lower target than difficulty=10");
+        assert!(
+            t100 < t10,
+            "difficulty=100 must have a lower target than difficulty=10"
+        );
     }
 
     #[test]
@@ -250,14 +258,8 @@ mod tests {
         let low_ff = "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
         assert!(verify_pow_hash(low_zero, 2));
-        assert_eq!(
-            verify_pow_hash(low_zero, 2),
-            verify_pow_hash(low_one, 2)
-        );
-        assert_eq!(
-            verify_pow_hash(low_zero, 2),
-            verify_pow_hash(low_ff, 2)
-        );
+        assert_eq!(verify_pow_hash(low_zero, 2), verify_pow_hash(low_one, 2));
+        assert_eq!(verify_pow_hash(low_zero, 2), verify_pow_hash(low_ff, 2));
     }
 
     #[test]
@@ -326,12 +328,12 @@ mod tests {
     fn slower_blocks_decrease_difficulty() {
         // 21 blocks at 120s intervals (much slower than TARGET_BLOCK_TIME = 30s).
         let start = 1_700_000_000u64;
-        let slow  = make_chain(21, 120, 1_000, start);
+        let slow = make_chain(21, 120, 1_000, start);
         let ideal = make_chain(21, TARGET_BLOCK_TIME, 1_000, start);
-        let now_slow  = slow.last().unwrap().header.timestamp + 1;
+        let now_slow = slow.last().unwrap().header.timestamp + 1;
         let now_ideal = ideal.last().unwrap().header.timestamp + 1;
 
-        let diff_slow  = calculate_next_difficulty(&slow,  now_slow);
+        let diff_slow = calculate_next_difficulty(&slow, now_slow);
         let diff_ideal = calculate_next_difficulty(&ideal, now_ideal);
         assert!(
             diff_slow < diff_ideal,
@@ -365,7 +367,7 @@ mod tests {
         let stall_now = last_ts + TARGET_BLOCK_TIME * STALL_MULTIPLIER * 2;
         let without_stall = last_ts + TARGET_BLOCK_TIME;
 
-        let d_stall  = calculate_next_difficulty(&chain, stall_now);
+        let d_stall = calculate_next_difficulty(&chain, stall_now);
         let d_normal = calculate_next_difficulty(&chain, without_stall);
         assert!(
             d_stall < d_normal,
@@ -384,14 +386,18 @@ mod tests {
         let mut manipulated: Vec<Block> = Vec::new();
         let mut ts = 0u64;
         for i in 0..21usize {
-            let interval = if i % 2 == 0 { 1 } else { TARGET_BLOCK_TIME * 2 - 1 };
+            let interval = if i % 2 == 0 {
+                1
+            } else {
+                TARGET_BLOCK_TIME * 2 - 1
+            };
             manipulated.push(make_block(i as u64, ts, 1_000));
             ts += interval;
         }
         let last_ts_m = manipulated.last().unwrap().header.timestamp;
 
         let d_normal = calculate_next_difficulty(&normal, last_ts_n + TARGET_BLOCK_TIME);
-        let d_manip  = calculate_next_difficulty(&manipulated, last_ts_m + TARGET_BLOCK_TIME);
+        let d_manip = calculate_next_difficulty(&manipulated, last_ts_m + TARGET_BLOCK_TIME);
 
         // With clamping, the manipulated chain's difficulty must not deviate wildly.
         // Allow up to 3× difference (without clamping it could be orders of magnitude).

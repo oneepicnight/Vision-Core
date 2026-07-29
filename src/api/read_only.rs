@@ -55,9 +55,13 @@ mod tests {
             storage::{persist_tip, store_block, store_height_index},
         },
         config::{constants::TARGET_BLOCK_TIME, settings::Settings},
-
-        types::{transaction::{canonical_tx_id, canonical_unsigned_payload, simulate_tx_execution, CashTransferArgs, TxExecutionState, MIN_CASH_TRANSFER_FEE_LIMIT}, Block, BlockHeader, Tx},
-
+        types::{
+            transaction::{
+                canonical_tx_id, canonical_unsigned_payload, simulate_tx_execution,
+                CashTransferArgs, TxExecutionState, MIN_CASH_TRANSFER_FEE_LIMIT,
+            },
+            Block, BlockHeader, Tx,
+        },
     };
 
     fn signing_key(seed: u8) -> SigningKey {
@@ -180,8 +184,12 @@ mod tests {
             .unwrap_or(0)
             + block.header.difficulty as u128;
         chain.blocks.push(block.clone());
-        chain.canon_index.insert(block.hash().to_string(), block.height());
-        chain.cumulative_work.insert(block.hash().to_string(), cumulative);
+        chain
+            .canon_index
+            .insert(block.hash().to_string(), block.height());
+        chain
+            .cumulative_work
+            .insert(block.hash().to_string(), cumulative);
         chain.cached_state_root = Some((block.height(), block.header.state_root.clone()));
         persist_tip(chain).unwrap();
     }
@@ -192,16 +200,13 @@ mod tests {
 
     async fn router_response<T: DeserializeOwned>(router: Router, uri: String) -> (StatusCode, T) {
         let response = router
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
-        let bytes = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let value = serde_json::from_slice(&bytes).unwrap();
         (status, value)
     }
@@ -229,10 +234,38 @@ mod tests {
 
         assert_eq!(balance_status, StatusCode::OK);
         assert_eq!(nonce_status, StatusCode::OK);
-        assert_eq!(balance, AccountBalanceSnapshot { address: account.clone(), exists: true, balance: 42_000 });
-        assert_eq!(nonce, AccountNonceSnapshot { address: account.clone(), exists: true, nonce: 7 });
-        assert_eq!(unknown_balance, AccountBalanceSnapshot { address: unknown.clone(), exists: false, balance: 0 });
-        assert_eq!(unknown_nonce, AccountNonceSnapshot { address: unknown, exists: false, nonce: 0 });
+        assert_eq!(
+            balance,
+            AccountBalanceSnapshot {
+                address: account.clone(),
+                exists: true,
+                balance: 42_000
+            }
+        );
+        assert_eq!(
+            nonce,
+            AccountNonceSnapshot {
+                address: account.clone(),
+                exists: true,
+                nonce: 7
+            }
+        );
+        assert_eq!(
+            unknown_balance,
+            AccountBalanceSnapshot {
+                address: unknown.clone(),
+                exists: false,
+                balance: 0
+            }
+        );
+        assert_eq!(
+            unknown_nonce,
+            AccountNonceSnapshot {
+                address: unknown,
+                exists: false,
+                nonce: 0
+            }
+        );
     }
 
     #[tokio::test]
@@ -248,7 +281,9 @@ mod tests {
 
         let mut restarted = open_node(&dir).await;
         let restarted_height = restarted.current_height();
-        let restored_height = crate::chain::snapshots::restore_latest_snapshot(&mut restarted, restarted_height).unwrap();
+        let restored_height =
+            crate::chain::snapshots::restore_latest_snapshot(&mut restarted, restarted_height)
+                .unwrap();
         assert_eq!(restored_height, 0);
 
         let state = Arc::new(Mutex::new(restarted));
@@ -274,14 +309,7 @@ mod tests {
         let recipient = signing_address(5);
         chain.credit_balance(&sender, 50_000);
 
-        let tx = transfer_tx(
-            4,
-            0,
-            &recipient,
-            10_000,
-            5,
-            MIN_CASH_TRANSFER_FEE_LIMIT,
-        );
+        let tx = transfer_tx(4, 0, &recipient, 10_000, 5, MIN_CASH_TRANSFER_FEE_LIMIT);
         let tx_id = canonical_tx_id(&tx);
         let block = canonical_test_block(&mut chain, tx.clone());
         persist_canonical_block(&mut chain, &block);

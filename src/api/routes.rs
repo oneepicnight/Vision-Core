@@ -1,4 +1,7 @@
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 
 use crate::api::state::NodeApiState;
 use crate::api::{alpha, mining, peers, read_only, status, transactions};

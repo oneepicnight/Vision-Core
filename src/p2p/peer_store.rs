@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use anyhow::Result;
+use std::collections::HashSet;
 
 /// Persistent peer address store backed by a newline-delimited text file.
 ///
@@ -7,7 +7,7 @@ use anyhow::Result;
 /// and written after every meaningful mutation. Duplicate addresses are silently
 /// de-duplicated; blank lines and leading/trailing whitespace are ignored.
 pub struct PeerStore {
-    path:  String,
+    path: String,
     known: HashSet<String>,
 }
 
@@ -24,7 +24,10 @@ impl PeerStore {
         } else {
             HashSet::new()
         };
-        Ok(Self { path: path.to_string(), known })
+        Ok(Self {
+            path: path.to_string(),
+            known,
+        })
     }
 
     /// Return the number of known peer addresses.
@@ -201,11 +204,13 @@ mod tests {
     fn merge_returns_count_of_new_addresses() {
         let (mut store, _dir) = temp_store();
         store.add("existing:9000").unwrap();
-        let added = store.merge(&[
-            "existing:9000".to_string(),
-            "new1:9000".to_string(),
-            "new2:9000".to_string(),
-        ]).unwrap();
+        let added = store
+            .merge(&[
+                "existing:9000".to_string(),
+                "new1:9000".to_string(),
+                "new2:9000".to_string(),
+            ])
+            .unwrap();
         assert_eq!(added, 2);
         assert_eq!(store.len(), 3);
     }

@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use anyhow::{anyhow, Result};
 use crate::config::constants::DIFFICULTY_FLOOR;
 use crate::types::{Block, BlockHeader};
+use anyhow::{anyhow, Result};
+use std::collections::BTreeMap;
 
 // ─── Consensus-locked hashes ──────────────────────────────────────────────────
 
@@ -11,15 +11,13 @@ use crate::types::{Block, BlockHeader};
 /// `BlockHeader::canonical_bytes()` with the parameters below.
 ///
 /// DO NOT change — changing this value is a hard fork.
-pub const GENESIS_HASH: &str =
-    "d6469ec95f56b56be4921ef40b9795902c96f2ad26582ef8db8fac46f4a7aa13";
+pub const GENESIS_HASH: &str = "d6469ec95f56b56be4921ef40b9795902c96f2ad26582ef8db8fac46f4a7aa13";
 
 /// Economics fingerprint: blake3 over each vault's 20-byte address followed
 /// by its 4-byte big-endian BPS share, concatenated in declaration order.
 ///
 /// DO NOT change — changing this value is a hard fork.
-pub const ECON_HASH: &str =
-    "a18f9f82aeb6276b5cfb353e351cd0cf9b34aad962e29f4ac6268f0659c55f95";
+pub const ECON_HASH: &str = "a18f9f82aeb6276b5cfb353e351cd0cf9b34aad962e29f4ac6268f0659c55f95";
 
 // ─── Genesis block parameters ─────────────────────────────────────────────────
 //
@@ -159,16 +157,16 @@ pub fn genesis_block() -> Block {
     Block {
         header: BlockHeader {
             parent_hash: null_hash.clone(),
-            number:      GENESIS_HEIGHT,
-            timestamp:   GENESIS_TIMESTAMP,
-            difficulty:  GENESIS_DIFFICULTY,
-            nonce:       GENESIS_NONCE,
-            pow_hash:    GENESIS_HASH.to_string(),
-            state_root:  null_hash.clone(),
-            tx_root:     null_hash,
-            miner:       GENESIS_MINER.to_string(),
+            number: GENESIS_HEIGHT,
+            timestamp: GENESIS_TIMESTAMP,
+            difficulty: GENESIS_DIFFICULTY,
+            nonce: GENESIS_NONCE,
+            pow_hash: GENESIS_HASH.to_string(),
+            state_root: null_hash.clone(),
+            tx_root: null_hash,
+            miner: GENESIS_MINER.to_string(),
         },
-        txs:    vec![],
+        txs: vec![],
         weight: 0,
     }
 }
@@ -332,7 +330,9 @@ mod tests {
 
     #[test]
     fn genesis_balances_is_empty_at_launch() {
-        assert!(genesis_balances().is_empty(),
-            "pure-emission chain has no pre-mine; genesis balances must be empty");
+        assert!(
+            genesis_balances().is_empty(),
+            "pure-emission chain has no pre-mine; genesis balances must be empty"
+        );
     }
 }

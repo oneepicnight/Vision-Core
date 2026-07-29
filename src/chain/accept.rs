@@ -16,13 +16,13 @@
 //! 7. **Chain selection**      — cumulative-work comparison for side chains
 //! 8. **Integration**          — push to canonical, side-chain store, or orphan pool
 
-use std::collections::{HashSet, VecDeque};
-use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::chain::ChainState;
 use crate::chain::state_root::compute_state_root;
+use crate::chain::ChainState;
 use crate::config::constants::*;
 use crate::miner::block_reward;
 use crate::pow::difficulty::{calculate_next_difficulty, difficulty_to_target};
@@ -36,7 +36,12 @@ pub(crate) fn apply_coinbase_reward(
     miner: &str,
     height: u64,
 ) -> Result<(), String> {
-    if miner.len() != 64 || !miner.as_bytes().iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if miner.len() != 64
+        || !miner
+            .as_bytes()
+            .iter()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return Err("invalid miner address".into());
     }
 
@@ -138,10 +143,11 @@ fn pow_failure_diagnostic(
     let block_hash = blk.hash().to_string();
     let header_bytes = blk.header.canonical_bytes();
     let header_bytes_blake3 = hex::encode(blake3::hash(&header_bytes).as_bytes());
-    let (preimage_len, preimage_blake3) = match historical_vpow_message_bytes_with_nonce_zero(&blk.header) {
-        Ok(bytes) => (bytes.len(), hex::encode(blake3::hash(&bytes).as_bytes())),
-        Err(err) => (0, format!("encoding-error:{err}")),
-    };
+    let (preimage_len, preimage_blake3) =
+        match historical_vpow_message_bytes_with_nonce_zero(&blk.header) {
+            Ok(bytes) => (bytes.len(), hex::encode(blake3::hash(&bytes).as_bytes())),
+            Err(err) => (0, format!("encoding-error:{err}")),
+        };
     let digest_hex = hex::encode(digest);
     let target_hex = hex::encode(target);
     let binary_sha256 = runtime_binary_sha256();
@@ -261,7 +267,8 @@ fn verify_visionx_pow(
 /// # Consensus-critical
 /// Must produce identical accept/reject decisions on every node.
 pub fn verify_pow_only(blk: &Block) -> anyhow::Result<()> {
-    verify_visionx_pow(blk, None, "verify_pow_only").map_err(|reason| anyhow::anyhow!("PoW check failed: {}", reason))?;
+    verify_visionx_pow(blk, None, "verify_pow_only")
+        .map_err(|reason| anyhow::anyhow!("PoW check failed: {}", reason))?;
     mark_pow_prevalidated(blk.hash());
     Ok(())
 }
@@ -324,7 +331,7 @@ fn push_canonical(g: &mut ChainState, blk: Block, cw: u128) {
     g.seen_blocks.insert(hash.clone());
     g.canon_index.insert(hash, height);
     g.blocks.push(blk);
-    }
+}
 
 fn execute_non_coinbase_txs(state: &mut TxExecutionState, blk: &Block) -> Result<(), String> {
     for (idx, tx) in blk.txs.iter().enumerate().skip(1) {
@@ -406,11 +413,7 @@ fn reconstruct_parent_state_for_side_chain(
 /// Every validation rule must produce identical decisions on all nodes.
 /// Adding, removing, or reordering checks requires a network-coordinated
 /// hard fork.
-pub fn apply_block(
-    g: &mut ChainState,
-    blk: &Block,
-    source_peer: Option<&str>,
-) -> AcceptResult {
+pub fn apply_block(g: &mut ChainState, blk: &Block, source_peer: Option<&str>) -> AcceptResult {
     let hash = blk.hash().to_string();
     clear_pow_prevalidation(&hash);
 
@@ -438,9 +441,7 @@ pub fn apply_block(
         match blk.txs.first() {
             None => return AcceptResult::Rejected("missing coinbase tx".into()),
             Some(cb) if cb.module != "coinbase" || cb.method != "reward" => {
-                return AcceptResult::Rejected(
-                    "first tx must be coinbase::reward".into(),
-                );
+                return AcceptResult::Rejected("first tx must be coinbase::reward".into());
             }
             _ => {}
         }
@@ -478,23 +479,26 @@ pub fn apply_block(
     let parent_in_canon = g.canon_index.contains_key(parent_hash.as_str());
     let parent_in_side = g.side_blocks.contains_key(parent_hash.as_str());
     let tip_hash = g.tip_hash();
-    let tip_cw = g.cumulative_work.get(tip_hash.as_str()).copied().unwrap_or(0);
-    let parent_cw = g.cumulative_work.get(parent_hash.as_str()).copied().unwrap_or(0);
+    let tip_cw = g
+        .cumulative_work
+        .get(tip_hash.as_str())
+        .copied()
+        .unwrap_or(0);
+    let parent_cw = g
+        .cumulative_work
+        .get(parent_hash.as_str())
+        .copied()
+        .unwrap_or(0);
     let candidate_cw = parent_cw + blk.header.difficulty as u128;
 
     if !parent_in_canon && !parent_in_side {
         // Parent unknown — stash in orphan pool for future promotion.
-        crate::chain::orphan::add_orphan(
-            g,
-            blk.clone(),
-            source_peer.unwrap_or("anon"),
-        );
+        crate::chain::orphan::add_orphan(g, blk.clone(), source_peer.unwrap_or("anon"));
         return AcceptResult::StoredOrphan { block_hash: hash };
     }
 
     // Materialise the parent block for timestamp validation.
-    let parent_blk = resolve_block(g, &parent_hash)
-        .expect("parent confirmed present above");
+    let parent_blk = resolve_block(g, &parent_hash).expect("parent confirmed present above");
 
     // ── Stage 3 — Timestamp validation ───────────────────────────────────────
 
@@ -551,8 +555,7 @@ pub fn apply_block(
                 cb.args.len()
             ));
         }
-        let encoded_height =
-            u64::from_be_bytes(cb.args.as_slice().try_into().unwrap());
+        let encoded_height = u64::from_be_bytes(cb.args.as_slice().try_into().unwrap());
         if encoded_height != blk.header.number {
             return AcceptResult::Rejected(format!(
                 "coinbase height mismatch: encoded={} block={}",
@@ -604,15 +607,13 @@ pub fn apply_block(
             return AcceptResult::Rejected(format!("coinbase reward failed: {:?}", err));
         }
     }
-    let computed_state_root = match compute_state_root(
-        &validated_tx_state.balances,
-        &validated_tx_state.nonces,
-    ) {
-        Ok(root) => root,
-        Err(_) => {
-            return AcceptResult::Rejected("state_root construction failed".into());
-        }
-    };
+    let computed_state_root =
+        match compute_state_root(&validated_tx_state.balances, &validated_tx_state.nonces) {
+            Ok(root) => root,
+            Err(_) => {
+                return AcceptResult::Rejected("state_root construction failed".into());
+            }
+        };
 
     if blk.header.state_root != computed_state_root {
         return AcceptResult::Rejected(format!(
@@ -625,7 +626,10 @@ pub fn apply_block(
         // LANE-A: straightforward extension of the current canonical tip.
         tracing::debug!(
             "[LANE-A] h={} hash={:.8} cw={} peer={:?}",
-            blk.header.number, hash, candidate_cw, source_peer
+            blk.header.number,
+            hash,
+            candidate_cw,
+            source_peer
         );
         if let Err(err) = crate::chain::storage::persist_canonical_extension(g, blk) {
             return AcceptResult::Rejected(format!("canonical persistence failed: {}", err));
@@ -642,7 +646,11 @@ pub fn apply_block(
     // LANE-B: valid block on a non-tip chain; record it and test for reorg.
     tracing::debug!(
         "[LANE-B] h={} hash={:.8} cw={} tip_cw={} peer={:?}",
-        blk.header.number, hash, candidate_cw, tip_cw, source_peer
+        blk.header.number,
+        hash,
+        candidate_cw,
+        tip_cw,
+        source_peer
     );
     if let Err(err) = crate::chain::storage::store_block(g, blk) {
         return AcceptResult::Rejected(format!("side-chain persistence failed: {}", err));
@@ -658,9 +666,11 @@ pub fn apply_block(
         if let Some(recovery) = reorg_recovery {
             g.pending_reorg_recovery = Some(recovery);
             tracing::info!(
-            "[REORG] new tip h={} hash={:.8} cw={}",
-            blk.header.number, hash, candidate_cw
-        );
+                "[REORG] new tip h={} hash={:.8} cw={}",
+                blk.header.number,
+                hash,
+                candidate_cw
+            );
             let height = blk.height();
             crate::chain::orphan::process_orphans(g, &hash);
             return AcceptResult::CanonExtension { height };
@@ -677,10 +687,10 @@ pub fn apply_block(
 /// builds and carry zero production overhead.
 #[cfg(test)]
 pub mod tests_helpers {
-    use crate::config::constants::DIFFICULTY_FLOOR;
-    use crate::pow::visionx::historical_block_digest;
     use super::apply_coinbase_reward;
     use crate::chain::state_root::compute_state_root;
+    use crate::config::constants::DIFFICULTY_FLOOR;
+    use crate::pow::visionx::historical_block_digest;
     use crate::pow::VISIONX_PARAMS;
     use crate::types::transaction::{simulate_tx_execution, TxExecutionState};
     use crate::types::{Block, BlockHeader, Tx};
@@ -688,14 +698,14 @@ pub mod tests_helpers {
     /// Build a coinbase transaction encoding `height` as 8-byte big-endian.
     pub fn coinbase_tx(height: u64) -> Tx {
         Tx {
-            nonce:         height,
+            nonce: height,
             sender_pubkey: String::new(),
-            module:        "coinbase".to_string(),
-            method:        "reward".to_string(),
-            args:          height.to_be_bytes().to_vec(),
-            tip:           0,
-            fee_limit:     0,
-            sig:           String::new(),
+            module: "coinbase".to_string(),
+            method: "reward".to_string(),
+            args: height.to_be_bytes().to_vec(),
+            tip: 0,
+            fee_limit: 0,
+            sig: String::new(),
         }
     }
 
@@ -703,12 +713,7 @@ pub mod tests_helpers {
     ///
     /// `slot` (0x00–0xFE) controls the `pow_hash` prefix byte.  Any slot ≤ 0xFE
     /// yields a hash that satisfies PoW at `DIFFICULTY_FLOOR` (difficulty = 1).
-    pub fn make_test_block(
-        parent_hash: &str,
-        height: u64,
-        timestamp: u64,
-        slot: u8,
-    ) -> Block {
+    pub fn make_test_block(parent_hash: &str, height: u64, timestamp: u64, slot: u8) -> Block {
         let txs = vec![coinbase_tx(height)];
         let tx_root = {
             let mut h = blake3::Hasher::new();
@@ -744,17 +749,18 @@ pub mod tests_helpers {
             .expect("test block VisionX digest should build");
         block.header.pow_hash = hex::encode(digest);
         block
-    }}
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use super::tests_helpers::make_test_block;
     use super::*;
     use crate::chain::storage::load_height_index;
-    use super::tests_helpers::make_test_block;
     use crate::config::constants::{DIFFICULTY_FLOOR, LWMA_MIN_INTERVAL_SECS, TARGET_BLOCK_TIME};
+    use crate::genesis;
     use crate::pow::visionx::historical_block_digest;
     use crate::pow::VISIONX_PARAMS;
-    use crate::genesis;
     use crate::types::transaction::{
         canonical_unsigned_payload, CashTransferArgs, MIN_CASH_TRANSFER_FEE_LIMIT,
     };
@@ -862,10 +868,8 @@ mod tests {
     ) -> Block {
         let mut blk = make_test_block(parent_hash, height, timestamp, slot);
         blk.txs.extend(extra_txs);
-        let mut exec_state = TxExecutionState::from_balances_and_nonces(
-            balances.clone(),
-            nonces.clone(),
-        );
+        let mut exec_state =
+            TxExecutionState::from_balances_and_nonces(balances.clone(), nonces.clone());
         for tx in blk.txs.iter().skip(1) {
             simulate_tx_execution(&mut exec_state, tx).ok();
         }
@@ -890,17 +894,15 @@ mod tests {
     ) -> Block {
         let mut blk = make_test_block(parent_hash, height, timestamp, slot);
         blk.header.miner = miner.to_string();
-        let mut state = TxExecutionState::from_balances_and_nonces(
-            balances.clone(),
-            nonces.clone(),
-        );
+        let mut state =
+            TxExecutionState::from_balances_and_nonces(balances.clone(), nonces.clone());
         apply_coinbase_reward(&mut state, miner, height)
             .expect("test reward block should credit miner");
         blk.header.state_root = compute_state_root(&state.balances, &state.nonces)
             .expect("test reward block should compute state root");
         rehash_block(&mut blk);
         blk
-    }    // ── Canonical append ──────────────────────────────────────────────────────
+    } // ── Canonical append ──────────────────────────────────────────────────────
 
     #[test]
     fn canon_append_genesis_then_block1() {
@@ -911,7 +913,12 @@ mod tests {
         assert_eq!(r0, AcceptResult::CanonExtension { height: 0 });
         assert_eq!(g.blocks.len(), 1);
 
-        let b1 = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let b1 = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         let r1 = apply_block(&mut g, &b1, None);
         assert_eq!(r1, AcceptResult::CanonExtension { height: 1 });
         assert_eq!(g.blocks.len(), 2);
@@ -925,13 +932,17 @@ mod tests {
         apply_block(&mut g, &gen, None);
 
         let mut prev = gen.hash().to_string();
-        let mut ts   = gen.header.timestamp;
+        let mut ts = gen.header.timestamp;
         for i in 1u64..=5 {
             ts += TARGET_BLOCK_TIME;
             let blk = make_block(&prev, i, ts, (0xA0 + i) as u8);
             let r = apply_block(&mut g, &blk, None);
-            assert_eq!(r, AcceptResult::CanonExtension { height: i },
-                "block {} should extend canon", i);
+            assert_eq!(
+                r,
+                AcceptResult::CanonExtension { height: i },
+                "block {} should extend canon",
+                i
+            );
             prev = blk.hash().to_string();
         }
         assert_eq!(g.blocks.len(), 6, "genesis + 5 canonical blocks");
@@ -944,7 +955,12 @@ mod tests {
         apply_block(&mut g, &gen, None);
         assert_eq!(g.cumulative_work[gen.hash()], DIFFICULTY_FLOOR as u128);
 
-        let b1 = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let b1 = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         apply_block(&mut g, &b1, None);
         assert_eq!(g.cumulative_work[b1.hash()], 2 * DIFFICULTY_FLOOR as u128);
     }
@@ -959,7 +975,8 @@ mod tests {
         let r = apply_block(&mut g, &blk, Some("peer1"));
         assert!(
             matches!(r, AcceptResult::StoredOrphan { .. }),
-            "expected StoredOrphan, got {:?}", r
+            "expected StoredOrphan, got {:?}",
+            r
         );
         assert!(g.orphan_pool.contains_key(unknown_parent.as_str()));
         assert_eq!(g.blocks.len(), 0, "no blocks integrated");
@@ -1006,7 +1023,10 @@ mod tests {
             &g.nonces,
         );
 
-        assert_eq!(apply_block(&mut g, &blk, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(
+            apply_block(&mut g, &blk, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
         assert_eq!(g.balance_of(&miner), crate::miner::block_reward(1));
         assert_eq!(
             compute_state_root(&g.balances, &g.nonces).unwrap(),
@@ -1071,7 +1091,9 @@ mod tests {
         let before_nonces = g.nonces.clone();
 
         let result = apply_block(&mut g, &blk, None);
-        assert!(matches!(result, AcceptResult::Rejected(ref reason) if reason.contains("miner address")));
+        assert!(
+            matches!(result, AcceptResult::Rejected(ref reason) if reason.contains("miner address"))
+        );
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
     }
@@ -1087,8 +1109,14 @@ mod tests {
         // the difficulty-derived target.
         let ts1 = gen.header.timestamp + LWMA_MIN_INTERVAL_SECS;
         let b1 = make_block(gen.hash(), 1, ts1, 0xAA);
-        assert_eq!(apply_block(&mut g, &b1, None), AcceptResult::CanonExtension { height: 1 });
-        assert_eq!(load_height_index(&g, 1).unwrap().as_deref(), Some(b1.hash()));
+        assert_eq!(
+            apply_block(&mut g, &b1, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
+        assert_eq!(
+            load_height_index(&g, 1).unwrap().as_deref(),
+            Some(b1.hash())
+        );
 
         let ts2 = ts1 + TARGET_BLOCK_TIME;
         let expected_diff = calculate_next_difficulty(&g.blocks, ts2);
@@ -1099,7 +1127,11 @@ mod tests {
         bad.header.pow_hash = "ff".repeat(32);
 
         let r = apply_block(&mut g, &bad, None);
-        assert!(matches!(r, AcceptResult::Rejected(_)), "expected Rejected, got {:?}", r);
+        assert!(
+            matches!(r, AcceptResult::Rejected(_)),
+            "expected Rejected, got {:?}",
+            r
+        );
         if let AcceptResult::Rejected(reason) = r {
             assert!(reason.contains("PoW"), "rejection reason was: {}", reason);
         }
@@ -1113,7 +1145,12 @@ mod tests {
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let blk = visionx_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let blk = visionx_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         let r = apply_block(&mut g, &blk, None);
         assert_eq!(r, AcceptResult::CanonExtension { height: 1 });
     }
@@ -1124,11 +1161,20 @@ mod tests {
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let mut blk = visionx_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let mut blk = visionx_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         blk.header.nonce ^= 1;
 
         let r = apply_block(&mut g, &blk, None);
-        assert!(matches!(r, AcceptResult::Rejected(_)), "expected Rejected, got {:?}", r);
+        assert!(
+            matches!(r, AcceptResult::Rejected(_)),
+            "expected Rejected, got {:?}",
+            r
+        );
         if let AcceptResult::Rejected(reason) = r {
             assert!(reason.contains("PoW"), "rejection reason was: {}", reason);
         }
@@ -1139,7 +1185,12 @@ mod tests {
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let mut blk = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let mut blk = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         blk.header.state_root = "11".repeat(32);
         rehash_block(&mut blk);
         let before_balances = g.balances.clone();
@@ -1160,7 +1211,12 @@ mod tests {
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let b1 = visionx_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let b1 = visionx_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         // Pre-validate before obtaining the chain lock.
         verify_pow_only(&b1).expect("should pre-validate");
         assert!(is_pow_prevalidated(b1.hash()), "should be in cache");
@@ -1168,7 +1224,10 @@ mod tests {
         let r = apply_block(&mut g, &b1, None);
         assert_eq!(r, AcceptResult::CanonExtension { height: 1 });
         // Cache entry consumed.
-        assert!(!is_pow_prevalidated(b1.hash()), "cache cleared after integration");
+        assert!(
+            !is_pow_prevalidated(b1.hash()),
+            "cache cleared after integration"
+        );
     }
 
     #[test]
@@ -1187,12 +1246,15 @@ mod tests {
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx],
+            vec![tx],
             &g.balances,
             &g.nonces,
         );
 
-        assert_eq!(apply_block(&mut g, &blk, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(
+            apply_block(&mut g, &blk, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
         assert_eq!(g.balance_of(&sender), 57);
         assert_eq!(g.balance_of(&recipient), 40);
         assert_eq!(g.nonce_of(&sender), 1);
@@ -1215,12 +1277,15 @@ vec![tx],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx0, tx1],
+            vec![tx0, tx1],
             &g.balances,
             &g.nonces,
         );
 
-        assert_eq!(apply_block(&mut g, &blk, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(
+            apply_block(&mut g, &blk, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
         assert_eq!(g.balance_of(&sender), 64);
         assert_eq!(g.balance_of(&recipient), 30);
         assert_eq!(g.nonce_of(&sender), 2);
@@ -1245,7 +1310,7 @@ vec![tx0, tx1],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx],
+            vec![tx],
             &g.balances,
             &g.nonces,
         );
@@ -1253,7 +1318,11 @@ vec![tx],
 
         assert!(matches!(result, AcceptResult::Rejected(_)));
         if let AcceptResult::Rejected(reason) = result {
-            assert!(reason.contains("InvalidSignature"), "reason was: {}", reason);
+            assert!(
+                reason.contains("InvalidSignature"),
+                "reason was: {}",
+                reason
+            );
         }
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
@@ -1277,7 +1346,7 @@ vec![tx],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx],
+            vec![tx],
             &g.balances,
             &g.nonces,
         );
@@ -1309,7 +1378,7 @@ vec![tx],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx],
+            vec![tx],
             &g.balances,
             &g.nonces,
         );
@@ -1317,7 +1386,11 @@ vec![tx],
 
         assert!(matches!(result, AcceptResult::Rejected(_)));
         if let AcceptResult::Rejected(reason) = result {
-            assert!(reason.contains("InsufficientBalance"), "reason was: {}", reason);
+            assert!(
+                reason.contains("InsufficientBalance"),
+                "reason was: {}",
+                reason
+            );
         }
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
@@ -1338,7 +1411,7 @@ vec![tx],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx],
+            vec![tx],
             &g.balances,
             &g.nonces,
         );
@@ -1365,7 +1438,7 @@ vec![tx],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx],
+            vec![tx],
             &g.balances,
             &g.nonces,
         );
@@ -1373,7 +1446,11 @@ vec![tx],
 
         assert!(matches!(result, AcceptResult::Rejected(_)));
         if let AcceptResult::Rejected(reason) = result {
-            assert!(reason.contains("UnsupportedModuleMethod"), "reason was: {}", reason);
+            assert!(
+                reason.contains("UnsupportedModuleMethod"),
+                "reason was: {}",
+                reason
+            );
         }
     }
 
@@ -1389,7 +1466,10 @@ vec![tx],
         let mut duplicate_intent = tx.clone();
         duplicate_intent.sig = "00".repeat(64);
         assert_ne!(tx.tx_id(), duplicate_intent.tx_id());
-        assert_eq!(crate::types::transaction::canonical_tx_id(&tx), crate::types::transaction::canonical_tx_id(&duplicate_intent));
+        assert_eq!(
+            crate::types::transaction::canonical_tx_id(&tx),
+            crate::types::transaction::canonical_tx_id(&duplicate_intent)
+        );
         g.balances.insert(sender.clone(), 100);
         let before_balances = g.balances.clone();
         let before_nonces = g.nonces.clone();
@@ -1399,7 +1479,7 @@ vec![tx],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx, duplicate_intent],
+            vec![tx, duplicate_intent],
             &g.balances,
             &g.nonces,
         );
@@ -1407,7 +1487,11 @@ vec![tx, duplicate_intent],
 
         assert!(matches!(result, AcceptResult::Rejected(_)));
         if let AcceptResult::Rejected(reason) = result {
-            assert!(reason.contains("duplicate canonical tx"), "reason was: {}", reason);
+            assert!(
+                reason.contains("duplicate canonical tx"),
+                "reason was: {}",
+                reason
+            );
         }
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
@@ -1432,7 +1516,7 @@ vec![tx, duplicate_intent],
             1,
             gen.header.timestamp + TARGET_BLOCK_TIME,
             0xAA,
-vec![tx0, tx_gap],
+            vec![tx0, tx_gap],
             &g.balances,
             &g.nonces,
         );
@@ -1454,17 +1538,21 @@ vec![tx0, tx_gap],
         apply_block(&mut g, &gen, None);
 
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
-        let side_parent_balances = std::collections::BTreeMap::from([(
-            "0".repeat(64),
-            crate::miner::block_reward(1),
-        )]);
+        let side_parent_balances =
+            std::collections::BTreeMap::from([("0".repeat(64), crate::miner::block_reward(1))]);
         let empty_nonces = std::collections::BTreeMap::new();
 
         let b1 = make_block(gen.hash(), 1, ts, 0xAA);
-        assert_eq!(apply_block(&mut g, &b1, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(
+            apply_block(&mut g, &b1, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
 
         let b2 = make_block(b1.hash(), 2, ts + TARGET_BLOCK_TIME, 0xAB);
-        assert_eq!(apply_block(&mut g, &b2, None), AcceptResult::CanonExtension { height: 2 });
+        assert_eq!(
+            apply_block(&mut g, &b2, None),
+            AcceptResult::CanonExtension { height: 2 }
+        );
 
         // Mutate the live tip state so the test would fail if side-chain
         // validation consulted it instead of reconstructing the branch parent.
@@ -1488,14 +1576,18 @@ vec![tx0, tx_gap],
         let r3 = apply_block(&mut g, &side_block, None);
         assert!(
             matches!(r3, AcceptResult::SideChain { height: 2 }),
-            "expected SideChain, got {:?}", r3
+            "expected SideChain, got {:?}",
+            r3
         );
 
         assert_eq!(g.tip_hash(), before_tip);
         assert_eq!(g.blocks.len(), before_blocks);
         assert_eq!(g.balances, before_balances);
         assert_eq!(g.nonces, before_nonces);
-        assert_eq!(load_height_index(&g, 2).unwrap().as_deref(), Some(g.blocks[2].hash()));
+        assert_eq!(
+            load_height_index(&g, 2).unwrap().as_deref(),
+            Some(g.blocks[2].hash())
+        );
         assert!(g.side_blocks.contains_key(side_block.hash()));
         assert!(g.cumulative_work.contains_key(side_block.hash()));
     }
@@ -1507,14 +1599,15 @@ vec![tx0, tx_gap],
         apply_block(&mut g, &gen, None);
 
         let ts = gen.header.timestamp + TARGET_BLOCK_TIME;
-        let side_parent_balances = std::collections::BTreeMap::from([(
-            "0".repeat(64),
-            crate::miner::block_reward(1),
-        )]);
+        let side_parent_balances =
+            std::collections::BTreeMap::from([("0".repeat(64), crate::miner::block_reward(1))]);
         let empty_nonces = std::collections::BTreeMap::new();
 
         let b1 = make_block(gen.hash(), 1, ts, 0xAA);
-        assert_eq!(apply_block(&mut g, &b1, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(
+            apply_block(&mut g, &b1, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
 
         let mut bad_side_block = block_with_extra_txs(
             b1.hash(),
@@ -1536,7 +1629,11 @@ vec![tx0, tx_gap],
         let r = apply_block(&mut g, &bad_side_block, None);
         assert!(matches!(r, AcceptResult::Rejected(_)));
         if let AcceptResult::Rejected(reason) = r {
-            assert!(reason.contains("state_root mismatch"), "reason was: {}", reason);
+            assert!(
+                reason.contains("state_root mismatch"),
+                "reason was: {}",
+                reason
+            );
         }
         assert_eq!(g.tip_hash(), before_tip);
         assert_eq!(g.balances, before_balances);
@@ -1550,7 +1647,12 @@ vec![tx0, tx_gap],
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let mut bad = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let mut bad = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         bad.header.tx_root = "dead".repeat(16); // tamper with the root
 
         let r = apply_block(&mut g, &bad, None);
@@ -1563,11 +1665,19 @@ vec![tx0, tx_gap],
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let b1 = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let b1 = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         apply_block(&mut g, &b1, None);
 
         let r = apply_block(&mut g, &b1, None);
-        assert!(matches!(r, AcceptResult::Rejected(_)), "duplicate must be rejected");
+        assert!(
+            matches!(r, AcceptResult::Rejected(_)),
+            "duplicate must be rejected"
+        );
     }
 
     #[test]
@@ -1576,13 +1686,21 @@ vec![tx0, tx_gap],
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let mut bad = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let mut bad = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         // expected = DIFFICULTY_FLOOR = 1; set to 999 to trigger mismatch.
         bad.header.difficulty = 999;
 
         let r = apply_block(&mut g, &bad, None);
-        assert!(matches!(r, AcceptResult::Rejected(_)),
-            "wrong difficulty should be rejected, got {:?}", r);
+        assert!(
+            matches!(r, AcceptResult::Rejected(_)),
+            "wrong difficulty should be rejected, got {:?}",
+            r
+        );
     }
 
     #[test]
@@ -1595,8 +1713,11 @@ vec![tx0, tx_gap],
         let bad = make_block(gen.hash(), 1, far_future, 0xAA);
 
         let r = apply_block(&mut g, &bad, None);
-        assert!(matches!(r, AcceptResult::Rejected(_)),
-            "far-future timestamp should be rejected, got {:?}", r);
+        assert!(
+            matches!(r, AcceptResult::Rejected(_)),
+            "far-future timestamp should be rejected, got {:?}",
+            r
+        );
     }
 
     #[test]
@@ -1608,30 +1729,49 @@ vec![tx0, tx_gap],
         // Timestamp equal to genesis timestamp (0) is not monotonic.
         let bad = make_block(gen.hash(), 1, gen.header.timestamp, 0xAA);
         let r = apply_block(&mut g, &bad, None);
-        assert!(matches!(r, AcceptResult::Rejected(_)),
-            "non-monotonic timestamp should be rejected, got {:?}", r);
+        assert!(
+            matches!(r, AcceptResult::Rejected(_)),
+            "non-monotonic timestamp should be rejected, got {:?}",
+            r
+        );
     }
     fn prevalidated_valid_block() -> (ChainState, Block, String) {
         let mut g = temp_state();
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let valid = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
+        let valid = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
         let cached_hash = valid.hash().to_string();
         verify_pow_only(&valid).expect("baseline block should prevalidate");
-        assert!(is_pow_prevalidated(&cached_hash), "baseline hash should be cached");
+        assert!(
+            is_pow_prevalidated(&cached_hash),
+            "baseline hash should be cached"
+        );
         (g, valid, cached_hash)
     }
 
     fn assert_current_pow_rejects(label: &str, mutated: Block, cached_hash: String) {
-        assert_eq!(mutated.hash(), cached_hash, "{label} must retain the cached pow_hash key");
+        assert_eq!(
+            mutated.hash(),
+            cached_hash,
+            "{label} must retain the cached pow_hash key"
+        );
         let recomputed = historical_block_digest(
             &VISIONX_PARAMS,
             VISIONX_PARAMS.epoch(mutated.header.number),
             &mutated.header,
         )
         .expect("mutated block digest should compute");
-        assert_ne!(hex::encode(recomputed), cached_hash, "{label} mutation must invalidate PoW");
+        assert_ne!(
+            hex::encode(recomputed),
+            cached_hash,
+            "{label} mutation must invalidate PoW"
+        );
 
         let mut g = temp_state();
         let gen = genesis::genesis_block();
@@ -1641,7 +1781,10 @@ vec![tx0, tx_gap],
             matches!(result, AcceptResult::Rejected(_)),
             "{label} mutation was accepted through a stale prevalidation key: {result:?}"
         );
-        assert!(!is_pow_prevalidated(&cached_hash), "{label} cache entry should be cleared");
+        assert!(
+            !is_pow_prevalidated(&cached_hash),
+            "{label} cache entry should be cleared"
+        );
     }
 
     fn assert_prevalidated_mutation_rejected(label: &str, mutate: impl FnOnce(&mut Block)) {
@@ -1664,10 +1807,26 @@ vec![tx0, tx_gap],
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
 
-        let canonical_parent = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xA1);
-        assert_eq!(apply_block(&mut g, &canonical_parent, None), AcceptResult::CanonExtension { height: 1 });
-        let side_parent = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME + 1, 0xA2);
-        assert!(matches!(apply_block(&mut g, &side_parent, None), AcceptResult::SideChain { height: 1 }));
+        let canonical_parent = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xA1,
+        );
+        assert_eq!(
+            apply_block(&mut g, &canonical_parent, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
+        let side_parent = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME + 1,
+            0xA2,
+        );
+        assert!(matches!(
+            apply_block(&mut g, &side_parent, None),
+            AcceptResult::SideChain { height: 1 }
+        ));
 
         let valid_child = make_block(
             canonical_parent.hash(),
@@ -1680,18 +1839,32 @@ vec![tx0, tx_gap],
 
         let mut mutated = valid_child.clone();
         mutated.header.parent_hash = side_parent.hash().to_string();
-        assert_eq!(mutated.hash(), cached_hash, "parent mutation must retain the cached pow_hash key");
+        assert_eq!(
+            mutated.hash(),
+            cached_hash,
+            "parent mutation must retain the cached pow_hash key"
+        );
         let recomputed = historical_block_digest(
             &VISIONX_PARAMS,
             VISIONX_PARAMS.epoch(mutated.header.number),
             &mutated.header,
         )
         .expect("mutated child digest should compute");
-        assert_ne!(hex::encode(recomputed), cached_hash, "parent mutation must invalidate PoW");
+        assert_ne!(
+            hex::encode(recomputed),
+            cached_hash,
+            "parent mutation must invalidate PoW"
+        );
 
         let result = apply_block(&mut g, &mutated, None);
-        assert!(matches!(result, AcceptResult::Rejected(_)), "parent mutation should reject, got {result:?}");
-        assert!(!is_pow_prevalidated(&cached_hash), "parent mutation cache entry should be cleared");
+        assert!(
+            matches!(result, AcceptResult::Rejected(_)),
+            "parent mutation should reject, got {result:?}"
+        );
+        assert!(
+            !is_pow_prevalidated(&cached_hash),
+            "parent mutation cache entry should be cleared"
+        );
     }
 
     #[test]
@@ -1735,15 +1908,29 @@ vec![tx0, tx_gap],
         let mut g = temp_state();
         let gen = genesis::genesis_block();
         apply_block(&mut g, &gen, None);
-        let valid = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xAA);
-        assert_eq!(apply_block(&mut g, &valid, None), AcceptResult::CanonExtension { height: 1 });
+        let valid = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xAA,
+        );
+        assert_eq!(
+            apply_block(&mut g, &valid, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
 
         let cached_hash = valid.hash().to_string();
         verify_pow_only(&valid).expect("duplicate block should prevalidate");
         assert!(is_pow_prevalidated(&cached_hash));
         let result = apply_block(&mut g, &valid, None);
-        assert!(matches!(result, AcceptResult::Rejected(_)), "duplicate should reject before PoW, got {result:?}");
-        assert!(!is_pow_prevalidated(&cached_hash), "duplicate rejection should clear cache entry");
+        assert!(
+            matches!(result, AcceptResult::Rejected(_)),
+            "duplicate should reject before PoW, got {result:?}"
+        );
+        assert!(
+            !is_pow_prevalidated(&cached_hash),
+            "duplicate rejection should clear cache entry"
+        );
     }
 
     #[test]
@@ -1758,7 +1945,14 @@ vec![tx0, tx_gap],
     fn concurrent_prevalidation_entries_cannot_bypass_independent_verification() {
         let gen = genesis::genesis_block();
         let blocks: Vec<Block> = (0..8)
-            .map(|i| make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME + i, i as u8))
+            .map(|i| {
+                make_block(
+                    gen.hash(),
+                    1,
+                    gen.header.timestamp + TARGET_BLOCK_TIME + i,
+                    i as u8,
+                )
+            })
             .collect();
 
         std::thread::scope(|scope| {
@@ -1771,7 +1965,10 @@ vec![tx0, tx_gap],
 
         for (idx, block) in blocks.into_iter().enumerate() {
             let cached_hash = block.hash().to_string();
-            assert!(is_pow_prevalidated(&cached_hash), "concurrent cache entry {idx} should exist");
+            assert!(
+                is_pow_prevalidated(&cached_hash),
+                "concurrent cache entry {idx} should exist"
+            );
             let mut mutated = block.clone();
             mutated.header.nonce = mutated.header.nonce.wrapping_add(1 + idx as u64);
             assert_current_pow_rejects("concurrent prevalidation", mutated, cached_hash);
@@ -1780,12 +1977,19 @@ vec![tx0, tx_gap],
 
     #[test]
     fn exact_preserved_block12_synthetic_case_is_rejected() {
-        const BLOCK12_STORED_POW_HASH: &str = "21cbd526b5ae4178e8ffe81b57be8a340dd3c9b2dc3528345e0c5bc6dca6578e";
-        const BLOCK12_DETERMINISTIC_DIGEST: &str = "3cab81b8193cfd11ba0b35054e7e8409c25afd4835d202444e079ddf2476098e";
+        const BLOCK12_STORED_POW_HASH: &str =
+            "21cbd526b5ae4178e8ffe81b57be8a340dd3c9b2dc3528345e0c5bc6dca6578e";
+        const BLOCK12_DETERMINISTIC_DIGEST: &str =
+            "3cab81b8193cfd11ba0b35054e7e8409c25afd4835d202444e079ddf2476098e";
         assert_ne!(BLOCK12_STORED_POW_HASH, BLOCK12_DETERMINISTIC_DIGEST);
 
         let gen = genesis::genesis_block();
-        let mut block = make_block(gen.hash(), 1, gen.header.timestamp + TARGET_BLOCK_TIME, 0xBC);
+        let mut block = make_block(
+            gen.hash(),
+            1,
+            gen.header.timestamp + TARGET_BLOCK_TIME,
+            0xBC,
+        );
         block.header.pow_hash = BLOCK12_STORED_POW_HASH.to_string();
         mark_pow_prevalidated(BLOCK12_STORED_POW_HASH);
         assert!(is_pow_prevalidated(BLOCK12_STORED_POW_HASH));
@@ -1801,7 +2005,10 @@ vec![tx0, tx_gap],
         let mut g = temp_state();
         apply_block(&mut g, &gen, None);
         let result = apply_block(&mut g, &block, None);
-        assert!(matches!(result, AcceptResult::Rejected(_)), "preserved block-12 hash must not authorize acceptance, got {result:?}");
+        assert!(
+            matches!(result, AcceptResult::Rejected(_)),
+            "preserved block-12 hash must not authorize acceptance, got {result:?}"
+        );
         assert!(!is_pow_prevalidated(BLOCK12_STORED_POW_HASH));
     }
 }

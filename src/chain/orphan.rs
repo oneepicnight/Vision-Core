@@ -1,7 +1,7 @@
-﻿use crate::chain::ChainState;
+use crate::chain::ChainState;
+use crate::config::constants::ORPHAN_POOL_MAX;
 use crate::types::transaction::canonical_tx_id;
 use crate::types::Block;
-use crate::config::constants::ORPHAN_POOL_MAX;
 
 /// Move any orphaned blocks whose expected parent has now arrived into the
 /// canonical chain or side-block store via `apply_block`.
@@ -36,7 +36,7 @@ pub fn process_orphans(g: &mut ChainState, parent_hash: &str) -> usize {
 /// capacity the oldest orphan is evicted before the new one is added.
 pub fn add_orphan(g: &mut ChainState, block: Block, source_peer: &str) {
     let parent = block.header.parent_hash.clone();
-    let hash   = block.hash().to_string();
+    let hash = block.hash().to_string();
 
     // Evict before inserting so the pool never exceeds ORPHAN_POOL_MAX.
     prune_old_orphans(g);
@@ -91,12 +91,12 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::accept::tests_helpers::make_test_block;
     use crate::chain::accept::{apply_block, AcceptResult};
     use crate::chain::state::ChainState;
     use crate::config::constants::TARGET_BLOCK_TIME;
     use crate::genesis::genesis_block;
     use crate::types::{Block, BlockHeader, Tx};
-    use crate::chain::accept::tests_helpers::make_test_block;
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
@@ -105,14 +105,14 @@ mod tests {
 
     fn coinbase_tx(height: u64) -> Tx {
         Tx {
-            nonce:         height,
+            nonce: height,
             sender_pubkey: String::new(),
-            module:        "coinbase".to_string(),
-            method:        "reward".to_string(),
-            args:          height.to_be_bytes().to_vec(),
-            tip:           0,
-            fee_limit:     0,
-            sig:           String::new(),
+            module: "coinbase".to_string(),
+            method: "reward".to_string(),
+            args: height.to_be_bytes().to_vec(),
+            tip: 0,
+            fee_limit: 0,
+            sig: String::new(),
         }
     }
 
@@ -134,14 +134,14 @@ mod tests {
         Block {
             header: BlockHeader {
                 parent_hash: parent_hash.to_string(),
-                number:      height,
+                number: height,
                 timestamp,
-                difficulty:  crate::config::constants::DIFFICULTY_FLOOR,
-                nonce:       slot as u64,
-                pow_hash:    format!("{:064x}", slot),
-                state_root:  "0".repeat(64),
+                difficulty: crate::config::constants::DIFFICULTY_FLOOR,
+                nonce: slot as u64,
+                pow_hash: format!("{:064x}", slot),
+                state_root: "0".repeat(64),
                 tx_root,
-                miner:       "test_miner".to_string(),
+                miner: "test_miner".to_string(),
             },
             txs,
             weight: 0,
@@ -194,7 +194,8 @@ mod tests {
 
         for i in 0..=(ORPHAN_POOL_MAX as u64) {
             let fake_parent = format!("{:064x}", i);
-            let blk = make_orphan_bookkeeping_block(&fake_parent, i + 100, 1_700_000_000 + i * 30, 0xAA);
+            let blk =
+                make_orphan_bookkeeping_block(&fake_parent, i + 100, 1_700_000_000 + i * 30, 0xAA);
             add_orphan(&mut g, blk, "peer_flood");
         }
 
@@ -202,7 +203,8 @@ mod tests {
         assert!(
             total <= ORPHAN_POOL_MAX,
             "pool size {} should be â‰¤ {}",
-            total, ORPHAN_POOL_MAX
+            total,
+            ORPHAN_POOL_MAX
         );
     }
 
@@ -232,7 +234,3 @@ mod tests {
         assert!(!g.orphan_by_hash.contains_key(&b1_hash));
     }
 }
-
-
-
-

@@ -1,4 +1,10 @@
-﻿use axum::{body::Bytes, extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Serialize;
 
 use crate::api::state::NodeApiState;
@@ -48,7 +54,11 @@ pub(crate) struct TransactionSubmissionHttpResponse {
 }
 
 impl TransactionSubmissionHttpResponse {
-    fn accepted(tx_id: String, current_nonce: u64, decision: TransactionAdmissionDecisionHttp) -> Self {
+    fn accepted(
+        tx_id: String,
+        current_nonce: u64,
+        decision: TransactionAdmissionDecisionHttp,
+    ) -> Self {
         Self {
             status: "accepted",
             tx_id: Some(tx_id),
@@ -119,7 +129,9 @@ pub(crate) async fn submit_transaction_http(
     }
 }
 
-fn transaction_admission_decision_http(decision: AdmissionDecision) -> TransactionAdmissionDecisionHttp {
+fn transaction_admission_decision_http(
+    decision: AdmissionDecision,
+) -> TransactionAdmissionDecisionHttp {
     match decision {
         AdmissionDecision::Accept => TransactionAdmissionDecisionHttp {
             kind: "accept",
@@ -132,7 +144,9 @@ fn transaction_admission_decision_http(decision: AdmissionDecision) -> Transacti
     }
 }
 
-fn transaction_submission_error_http(error: &MempoolAdmissionError) -> TransactionSubmissionHttpError {
+fn transaction_submission_error_http(
+    error: &MempoolAdmissionError,
+) -> TransactionSubmissionHttpError {
     match error {
         MempoolAdmissionError::StatelessValidation(validation_error) => {
             tx_validation_error_http(validation_error)
@@ -611,7 +625,11 @@ mod tests {
 #[cfg(test)]
 mod http_tests {
     use super::*;
-    use axum::{body::{self, Bytes}, extract::State, http::StatusCode};
+    use axum::{
+        body::{self, Bytes},
+        extract::State,
+        http::StatusCode,
+    };
     use ed25519_dalek::{Signer, SigningKey};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -661,7 +679,9 @@ mod http_tests {
     async fn submit_json(state: NodeApiState, body: &str) -> (StatusCode, String) {
         let response = submit_transaction_http(State(state), Bytes::from(body.to_owned())).await;
         let status = response.status();
-        let bytes = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
@@ -812,7 +832,6 @@ mod http_tests {
     }
 }
 
-
 #[cfg(test)]
 mod http_state_tests {
     use super::*;
@@ -880,10 +899,3 @@ mod http_state_tests {
         assert_eq!(after, before);
     }
 }
-
-
-
-
-
-
-

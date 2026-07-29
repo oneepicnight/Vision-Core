@@ -310,7 +310,10 @@ mod tests {
         assert!(report.accepted.is_empty());
         assert!(matches!(
             report.rejected[0].1,
-            MempoolAdmissionError::StaleNonce { current_nonce: 2, tx_nonce: 0 }
+            MempoolAdmissionError::StaleNonce {
+                current_nonce: 2,
+                tx_nonce: 0
+            }
         ));
         assert!(mp.is_empty());
     }
@@ -573,7 +576,10 @@ mod tests {
             mp.insert(make_tx(n));
         }
         let first_id = canonical_tx_id(&make_tx(0));
-        assert!(mp.has(&first_id), "sanity: first tx present before overflow");
+        assert!(
+            mp.has(&first_id),
+            "sanity: first tx present before overflow"
+        );
 
         mp.insert(make_tx(MEMPOOL_MAX as u64));
         assert!(!mp.has(&first_id), "oldest tx should have been evicted");

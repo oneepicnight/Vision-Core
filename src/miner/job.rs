@@ -1,4 +1,4 @@
-﻿use crate::config::constants::{BLOCK_TARGET_TXS, EMISSION_PER_BLOCK, HALVING_INTERVAL};
+use crate::config::constants::{BLOCK_TARGET_TXS, EMISSION_PER_BLOCK, HALVING_INTERVAL};
 use crate::pow::difficulty::{calculate_next_difficulty, difficulty_to_target};
 use crate::pow::historical_vpow::HISTORICAL_VPOW_NONCE_OFFSET;
 use crate::pow::visionx::{VisionXParams, VISIONX_PARAMS};
@@ -459,6 +459,3 @@ mod tests {
         assert_eq!(job.header_template.parent_hash, b1.hash());
     }
 }
-
-
-

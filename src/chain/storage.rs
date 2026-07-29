@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Result};
 use crate::chain::ChainState;
 use crate::types::Block;
+use anyhow::{anyhow, Result};
 use sled::Batch;
 
 // ─── Key scheme ───────────────────────────────────────────────────────────────
@@ -28,7 +28,10 @@ pub fn persist_canonical_extension(g: &ChainState, block: &Block) -> Result<()> 
     let height = block.header.number;
     let mut batch = Batch::default();
 
-    batch.insert(format!("block:{}", hash).into_bytes(), bincode::serialize(block)?);
+    batch.insert(
+        format!("block:{}", hash).into_bytes(),
+        bincode::serialize(block)?,
+    );
     batch.insert(format!("height:{}", height).into_bytes(), hash.as_bytes());
     batch.insert(b"meta:tip_height", height.to_string().as_bytes());
     batch.insert(b"meta:tip_hash", hash.as_bytes());
@@ -51,19 +54,16 @@ pub fn load_block(g: &ChainState, hash: &str) -> Result<Option<Block>> {
 /// Also updates `meta:tip_hash` and `meta:tip_height` when `height` is
 /// the new maximum so that `load_canon_chain` can recover the full chain.
 pub fn store_height_index(g: &ChainState, height: u64, hash: &str) -> Result<()> {
-    g.db.insert(
-        format!("height:{}", height).as_bytes(),
-        hash.as_bytes(),
-    )?;
+    g.db.insert(format!("height:{}", height).as_bytes(), hash.as_bytes())?;
     // Maintain tip pointers eagerly; cheaper than a scan at startup.
-    let current_tip: u64 = g.db
-        .get(b"meta:tip_height")?
-        .and_then(|v| String::from_utf8(v.to_vec()).ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let current_tip: u64 =
+        g.db.get(b"meta:tip_height")?
+            .and_then(|v| String::from_utf8(v.to_vec()).ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
     if height >= current_tip {
         g.db.insert(b"meta:tip_height", height.to_string().as_bytes())?;
-        g.db.insert(b"meta:tip_hash",   hash.as_bytes())?;
+        g.db.insert(b"meta:tip_hash", hash.as_bytes())?;
     }
     Ok(())
 }
@@ -85,7 +85,10 @@ pub fn persist_canonical_reorg(
 
     for block in canonical_blocks {
         let hash = block.hash();
-        batch.insert(format!("block:{}", hash).into_bytes(), bincode::serialize(block)?);
+        batch.insert(
+            format!("block:{}", hash).into_bytes(),
+            bincode::serialize(block)?,
+        );
         batch.insert(
             format!("height:{}", block.header.number).into_bytes(),
             hash.as_bytes(),
@@ -125,8 +128,8 @@ pub fn load_canon_chain(g: &mut ChainState) -> Result<()> {
 
     let mut cumulative = 0u128;
     for h in 0..=tip_height {
-        let hash = load_height_index(g, h)?
-            .ok_or_else(|| anyhow!("height index missing at h={}", h))?;
+        let hash =
+            load_height_index(g, h)?.ok_or_else(|| anyhow!("height index missing at h={}", h))?;
 
         let block = load_block(g, &hash)?
             .ok_or_else(|| anyhow!("block missing for hash {} at h={}", hash, h))?;
@@ -160,9 +163,9 @@ pub fn load_meta(g: &ChainState, key: &str) -> Result<Option<String>> {
 
 /// Write the canonical tip hash to the database so restarts resume correctly.
 pub fn persist_tip(g: &ChainState) -> Result<()> {
-    let hash   = g.tip_hash();
+    let hash = g.tip_hash();
     let height = g.current_height();
-    g.db.insert(b"meta:tip_hash",   hash.as_bytes())?;
+    g.db.insert(b"meta:tip_hash", hash.as_bytes())?;
     g.db.insert(b"meta:tip_height", height.to_string().as_bytes())?;
     Ok(())
 }
@@ -172,11 +175,11 @@ pub fn persist_tip(g: &ChainState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::state::ChainState;
-    use crate::genesis::genesis_block;
     use crate::chain::accept::apply_block;
-    use crate::node::bootstrap::bootstrap_chain;
+    use crate::chain::state::ChainState;
     use crate::config::settings::Settings;
+    use crate::genesis::genesis_block;
+    use crate::node::bootstrap::bootstrap_chain;
 
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
@@ -238,10 +241,7 @@ mod tests {
             load_meta(&g, "tip_hash").unwrap().as_deref(),
             Some(gen.hash())
         );
-        assert_eq!(
-            load_meta(&g, "tip_height").unwrap().as_deref(),
-            Some("0")
-        );
+        assert_eq!(load_meta(&g, "tip_height").unwrap().as_deref(), Some("0"));
     }
 
     #[test]
@@ -268,22 +268,29 @@ mod tests {
             0xAA,
         );
         apply_block(&mut g, &b1, None);
-        let b2 = make_test_block(
-            b1.hash(),
-            2,
-            b1.header.timestamp + TARGET_BLOCK_TIME,
-            0xBB,
-        );
+        let b2 = make_test_block(b1.hash(), 2, b1.header.timestamp + TARGET_BLOCK_TIME, 0xBB);
         apply_block(&mut g, &b2, None);
-        assert_eq!(load_height_index(&g, 2).unwrap().as_deref(), Some(b2.hash()));
+        assert_eq!(
+            load_height_index(&g, 2).unwrap().as_deref(),
+            Some(b2.hash())
+        );
 
         persist_canonical_reorg(&g, &[gen.clone(), b1.clone()], 2).unwrap();
 
-        assert_eq!(load_height_index(&g, 0).unwrap().as_deref(), Some(gen.hash()));
-        assert_eq!(load_height_index(&g, 1).unwrap().as_deref(), Some(b1.hash()));
+        assert_eq!(
+            load_height_index(&g, 0).unwrap().as_deref(),
+            Some(gen.hash())
+        );
+        assert_eq!(
+            load_height_index(&g, 1).unwrap().as_deref(),
+            Some(b1.hash())
+        );
         assert!(load_height_index(&g, 2).unwrap().is_none());
         assert_eq!(load_meta(&g, "tip_height").unwrap().as_deref(), Some("1"));
-        assert_eq!(load_meta(&g, "tip_hash").unwrap().as_deref(), Some(b1.hash()));
+        assert_eq!(
+            load_meta(&g, "tip_hash").unwrap().as_deref(),
+            Some(b1.hash())
+        );
         assert!(load_block(&g, b2.hash()).unwrap().is_some());
     }
 

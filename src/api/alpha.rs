@@ -1,4 +1,10 @@
-use axum::{body::Bytes, extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::api::state::{AlphaAirdropError, AlphaAirdropSnapshot, NodeApiState};
@@ -101,7 +107,11 @@ pub(crate) async fn post_alpha_airdrop(State(state): State<NodeApiState>, body: 
     );
 
     match state.alpha_airdrop(&request.address, request.amount).await {
-        Ok(snapshot) => (StatusCode::OK, Json(AlphaAirdropHttpResponse::accepted(snapshot))).into_response(),
+        Ok(snapshot) => (
+            StatusCode::OK,
+            Json(AlphaAirdropHttpResponse::accepted(snapshot)),
+        )
+            .into_response(),
         Err(AlphaAirdropError::Disabled) => (
             StatusCode::NOT_FOUND,
             Json(AlphaAirdropHttpResponse::rejected(
@@ -148,7 +158,11 @@ pub(crate) async fn post_alpha_airdrop(State(state): State<NodeApiState>, body: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::{self, Body}, http::Request, Router};
+    use axum::{
+        body::{self, Body},
+        http::Request,
+        Router,
+    };
     use std::{path::Path, sync::Arc};
     use tempfile::TempDir;
     use tokio::sync::Mutex;
@@ -212,7 +226,9 @@ mod tests {
             .await
             .unwrap();
         let status = response.status();
-        let bytes = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
@@ -269,11 +285,8 @@ mod tests {
         let chain = open_chain(&dir);
         let router = router_for(chain, true);
 
-        let (status, body) = response_body(
-            router.clone(),
-            r#"{"address":"not-hex","amount":1}"#,
-        )
-        .await;
+        let (status, body) =
+            response_body(router.clone(), r#"{"address":"not-hex","amount":1}"#).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body.contains("invalid_address"));
 
@@ -297,5 +310,3 @@ mod tests {
         assert_eq!(body, "{\"status\":\"malformed_request\",\"scope\":\"alpha_dev_only\",\"error\":{\"code\":\"malformed_request\",\"message\":\"request body must be a JSON object with address and amount\"}}" );
     }
 }
-
-

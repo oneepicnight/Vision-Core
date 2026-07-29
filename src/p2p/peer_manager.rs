@@ -445,7 +445,6 @@ impl PeerManager {
             .map(|peer| peer.connection_generation)
     }
 
-
     pub fn peer_summary(&self, addr: &str) -> Option<ChainSummary> {
         self.peers.read().unwrap().get(addr).map(Peer::summary)
     }

@@ -1,4 +1,4 @@
-﻿use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 
 const STATE_ROOT_MAGIC: &[u8; 6] = b"VSTATE";
 const STATE_ROOT_VERSION: u32 = 1;
@@ -71,14 +71,8 @@ fn append_balances(
     Ok(())
 }
 
-fn append_nonces(
-    out: &mut Vec<u8>,
-    nonces: &BTreeMap<String, u64>,
-) -> Result<(), StateRootError> {
-    let mut entries: Vec<_> = nonces
-        .iter()
-        .filter(|(_, nonce)| **nonce != 0)
-        .collect();
+fn append_nonces(out: &mut Vec<u8>, nonces: &BTreeMap<String, u64>) -> Result<(), StateRootError> {
+    let mut entries: Vec<_> = nonces.iter().filter(|(_, nonce)| **nonce != 0).collect();
     entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
 
     out.extend_from_slice(&(entries.len() as u64).to_le_bytes());
@@ -148,12 +142,19 @@ mod tests {
     #[test]
     fn post_block_state_vector_matches_decision_record() {
         let balances = BTreeMap::from([
-            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 57),
-            ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), 40),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                57,
+            ),
+            (
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                40,
+            ),
         ]);
-        let nonces = BTreeMap::from([
-            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 1),
-        ]);
+        let nonces = BTreeMap::from([(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            1,
+        )]);
         let vector = canonical_state_vector(&balances, &nonces).unwrap();
         assert_eq!(hex::encode(vector), POST_VECTOR_HEX);
     }
@@ -161,30 +162,55 @@ mod tests {
     #[test]
     fn post_block_state_root_matches_decision_record() {
         let balances = BTreeMap::from([
-            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 57),
-            ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), 40),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                57,
+            ),
+            (
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                40,
+            ),
         ]);
-        let nonces = BTreeMap::from([
-            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 1),
-        ]);
+        let nonces = BTreeMap::from([(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            1,
+        )]);
         assert_eq!(compute_state_root(&balances, &nonces).unwrap(), POST_ROOT);
     }
 
     #[test]
     fn insertion_order_does_not_change_vector_or_root() {
         let mut balances_a = BTreeMap::new();
-        balances_a.insert("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), 40);
-        balances_a.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 57);
+        balances_a.insert(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            40,
+        );
+        balances_a.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            57,
+        );
 
         let mut balances_b = BTreeMap::new();
-        balances_b.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 57);
-        balances_b.insert("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), 40);
+        balances_b.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            57,
+        );
+        balances_b.insert(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            40,
+        );
 
         let mut nonces_a = BTreeMap::new();
-        nonces_a.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 1);
+        nonces_a.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            1,
+        );
 
         let mut nonces_b = BTreeMap::new();
-        nonces_b.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 1);
+        nonces_b.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            1,
+        );
 
         assert_eq!(
             canonical_state_vector(&balances_a, &nonces_a).unwrap(),
@@ -199,22 +225,40 @@ mod tests {
     #[test]
     fn zero_entries_are_elided() {
         let mut balances = BTreeMap::new();
-        balances.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 0);
-        balances.insert("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), 40);
+        balances.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            0,
+        );
+        balances.insert(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            40,
+        );
 
         let mut nonces = BTreeMap::new();
-        nonces.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 0);
-        nonces.insert("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), 1);
+        nonces.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            0,
+        );
+        nonces.insert(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            1,
+        );
 
         let vector = canonical_state_vector(&balances, &nonces).unwrap();
         let mut expected = Vec::new();
         expected.extend_from_slice(STATE_ROOT_MAGIC);
         expected.extend_from_slice(&STATE_ROOT_VERSION.to_le_bytes());
         expected.extend_from_slice(&1u64.to_le_bytes());
-        expected.extend_from_slice(&hex::decode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap());
+        expected.extend_from_slice(
+            &hex::decode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap(),
+        );
         expected.extend_from_slice(&40u128.to_le_bytes());
         expected.extend_from_slice(&1u64.to_le_bytes());
-        expected.extend_from_slice(&hex::decode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap());
+        expected.extend_from_slice(
+            &hex::decode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap(),
+        );
         expected.extend_from_slice(&1u64.to_le_bytes());
 
         assert_eq!(vector, expected);
@@ -234,7 +278,10 @@ mod tests {
     #[test]
     fn mixed_case_account_key_is_rejected() {
         let mut balances = BTreeMap::new();
-        balances.insert("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(), 1);
+        balances.insert(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            1,
+        );
         let (_, nonces) = empty_maps();
         assert_eq!(
             canonical_state_vector(&balances, &nonces),
@@ -245,27 +292,38 @@ mod tests {
     #[test]
     fn balance_changes_affect_root() {
         let mut balances = BTreeMap::new();
-        balances.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 57);
+        balances.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            57,
+        );
         let nonces = BTreeMap::new();
 
         let root1 = compute_state_root(&balances, &nonces).unwrap();
-        balances.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 58);
+        balances.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            58,
+        );
         let root2 = compute_state_root(&balances, &nonces).unwrap();
         assert_ne!(root1, root2);
     }
 
     #[test]
     fn nonce_changes_affect_root() {
-        let balances = BTreeMap::from([
-            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 57),
-        ]);
+        let balances = BTreeMap::from([(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            57,
+        )]);
         let mut nonces = BTreeMap::new();
-        nonces.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 1);
+        nonces.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            1,
+        );
         let root1 = compute_state_root(&balances, &nonces).unwrap();
-        nonces.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), 2);
+        nonces.insert(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            2,
+        );
         let root2 = compute_state_root(&balances, &nonces).unwrap();
         assert_ne!(root1, root2);
     }
 }
-
-

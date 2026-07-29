@@ -6,8 +6,6 @@ use once_cell::sync::Lazy;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-
-
 // ─── Algorithm parameters ─────────────────────────────────────────────────────
 
 /// VisionX algorithm parameters.
@@ -1023,7 +1021,10 @@ mod tests {
             let (alternate_dataset, alternate_mask) =
                 VisionXDataset::get_cached(&alternate, &small_parent, 0);
             assert!(!Arc::ptr_eq(&small_dataset, &alternate_dataset));
-            assert_eq!(small_mask, VisionXDataset::build(&small, &small_parent, 0).mask);
+            assert_eq!(
+                small_mask,
+                VisionXDataset::build(&small, &small_parent, 0).mask
+            );
             assert_eq!(
                 alternate_mask,
                 VisionXDataset::build(&alternate, &small_parent, 0).mask
@@ -1037,8 +1038,12 @@ mod tests {
             }
 
             if cycle % 250 == 0 {
-                let digest = historical_block_digest(&VISIONX_PARAMS, 0, &production_header).unwrap();
-                assert_eq!(digest, expected, "production digest changed at cycle {cycle}");
+                let digest =
+                    historical_block_digest(&VISIONX_PARAMS, 0, &production_header).unwrap();
+                assert_eq!(
+                    digest, expected,
+                    "production digest changed at cycle {cycle}"
+                );
             }
 
             let cache = DATASET_CACHE.lock().unwrap();

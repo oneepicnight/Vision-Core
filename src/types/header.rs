@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::config::constants::BLOCK_VERSION;
+use serde::{Deserialize, Serialize};
 
 /// Block header — the consensus-committed summary of one block.
 ///
@@ -82,14 +82,14 @@ mod tests {
     fn sample_header() -> BlockHeader {
         BlockHeader {
             parent_hash: "ab".repeat(32),
-            number:      1,
-            timestamp:   1_700_000_000,
-            difficulty:  1_000,
-            nonce:       42,
-            pow_hash:    "cd".repeat(32),
-            state_root:  "ef".repeat(32),
-            tx_root:     "01".repeat(32),
-            miner:       "0xdeadbeef".to_string(),
+            number: 1,
+            timestamp: 1_700_000_000,
+            difficulty: 1_000,
+            nonce: 42,
+            pow_hash: "cd".repeat(32),
+            state_root: "ef".repeat(32),
+            tx_root: "01".repeat(32),
+            miner: "0xdeadbeef".to_string(),
         }
     }
 
@@ -138,7 +138,10 @@ mod tests {
     fn genesis_header_compute_hash_matches_constant() {
         use crate::genesis::genesis::{genesis_block, GENESIS_HASH};
         let blk = genesis_block();
-        assert_eq!(blk.header.compute_hash(), GENESIS_HASH,
-            "genesis BlockHeader::compute_hash() must equal the locked GENESIS_HASH constant");
+        assert_eq!(
+            blk.header.compute_hash(),
+            GENESIS_HASH,
+            "genesis BlockHeader::compute_hash() must equal the locked GENESIS_HASH constant"
+        );
     }
 }

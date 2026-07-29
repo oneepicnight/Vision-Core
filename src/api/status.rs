@@ -26,10 +26,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_handler_returns_state_snapshot() {
-        let state = NodeApiState::new(
-            Arc::new(Mutex::new(temp_state())),
-            Arc::new(Mempool::new()),
-        );
+        let state = NodeApiState::new(Arc::new(Mutex::new(temp_state())), Arc::new(Mempool::new()));
 
         let Json(response) = get_status(State(state.clone())).await;
 

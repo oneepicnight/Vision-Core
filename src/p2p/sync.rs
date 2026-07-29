@@ -1085,10 +1085,7 @@ mod tests {
         guard.reset();
         pm.set_state(&malicious_peer, PeerState::Disconnected);
         pm.note_peer_height(&valid_peer, 6, false);
-        assert_eq!(
-            pm.best_sync_target(1).as_deref(),
-            Some(valid_peer.as_str())
-        );
+        assert_eq!(pm.best_sync_target(1).as_deref(), Some(valid_peer.as_str()));
 
         let second = timeout(
             Duration::from_secs(5),

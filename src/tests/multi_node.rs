@@ -2,17 +2,17 @@
 mod tests {
     use std::collections::BTreeMap;
     use std::future::Future;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
-    use std::sync::Arc;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
+    use crate::api::transactions::submit_transaction_http;
     use anyhow::{anyhow, Result};
-    use serde::{Deserialize, Serialize};
     use axum::body::{self, Bytes};
     use axum::extract::State;
-    use crate::api::transactions::submit_transaction_http;
     use ed25519_dalek::{Signer, SigningKey};
+    use serde::{Deserialize, Serialize};
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -86,7 +86,10 @@ mod tests {
 
         let chain_state = initialize_chain_state(&settings)?;
         let genesis_hash = chain_state.block_at(0).unwrap().hash().to_string();
-        assert_eq!(crate::chain::storage::load_height_index(&chain_state, 0)?.as_deref(), Some(genesis_hash.as_str()));
+        assert_eq!(
+            crate::chain::storage::load_height_index(&chain_state, 0)?.as_deref(),
+            Some(genesis_hash.as_str())
+        );
 
         let chain = Arc::new(Mutex::new(chain_state));
         let mempool = Arc::new(Mempool::new());
@@ -136,7 +139,10 @@ mod tests {
         })
     }
 
-    async fn start_node_from_existing_dir(data_dir: PathBuf, with_api: bool) -> Result<NodeHarness> {
+    async fn start_node_from_existing_dir(
+        data_dir: PathBuf,
+        with_api: bool,
+    ) -> Result<NodeHarness> {
         start_node_in_dir(data_dir, with_api).await
     }
 
@@ -170,14 +176,7 @@ mod tests {
         tx
     }
 
-    fn transfer_tx(
-        seed: u8,
-        nonce: u64,
-        to: &str,
-        amount: u128,
-        tip: u64,
-        fee_limit: u64,
-    ) -> Tx {
+    fn transfer_tx(seed: u8, nonce: u64, to: &str, amount: u128, tip: u64, fee_limit: u64) -> Tx {
         sign_tx(
             Tx {
                 nonce,
@@ -221,16 +220,17 @@ mod tests {
                 return Err(anyhow!("malformed key"));
             }
             let bytes = hex::decode(key)?;
-            bytes
-                .try_into()
-                .map_err(|_| anyhow!("malformed key"))
+            bytes.try_into().map_err(|_| anyhow!("malformed key"))
         }
 
         let mut out = Vec::new();
         out.extend_from_slice(b"VSTATE");
         out.extend_from_slice(&1u32.to_le_bytes());
 
-        let mut balances: Vec<_> = balances.iter().filter(|(_, amount)| **amount != 0).collect();
+        let mut balances: Vec<_> = balances
+            .iter()
+            .filter(|(_, amount)| **amount != 0)
+            .collect();
         balances.sort_by(|(a, _), (b, _)| a.cmp(b));
         out.extend_from_slice(&(balances.len() as u64).to_le_bytes());
         for (key, amount) in balances {
@@ -273,12 +273,11 @@ mod tests {
             hex::encode(h.finalize().as_bytes())
         };
 
-        let mut exec_state = TxExecutionState::from_balances_and_nonces(
-            balances.clone(),
-            nonces.clone(),
-        );
+        let mut exec_state =
+            TxExecutionState::from_balances_and_nonces(balances.clone(), nonces.clone());
         for tx in txs.iter().skip(1) {
-            simulate_tx_execution(&mut exec_state, tx).map_err(|e| anyhow!("tx execution failed: {:?}", e))?;
+            simulate_tx_execution(&mut exec_state, tx)
+                .map_err(|e| anyhow!("tx execution failed: {:?}", e))?;
         }
         if height != 0 {
             crate::chain::accept::apply_coinbase_reward(&mut exec_state, miner, height)
@@ -299,8 +298,8 @@ mod tests {
         };
 
         let epoch = VISIONX_PARAMS.epoch(height);
-        let digest = historical_block_digest(&VISIONX_PARAMS, epoch, &header)
-            .map_err(|e| anyhow!(e))?;
+        let digest =
+            historical_block_digest(&VISIONX_PARAMS, epoch, &header).map_err(|e| anyhow!(e))?;
         header.pow_hash = hex::encode(digest);
 
         let weight = txs.len() as u64;
@@ -364,10 +363,15 @@ mod tests {
         balances
     }
 
-    async fn sync_node_to_peer(node: &NodeHarness, peer_addr: &str, reported_height: u64) -> Result<()> {
+    async fn sync_node_to_peer(
+        node: &NodeHarness,
+        peer_addr: &str,
+        reported_height: u64,
+    ) -> Result<()> {
         node.peer_manager.upsert(peer_addr, true);
         node.peer_manager.set_state(peer_addr, PeerState::Connected);
-        node.peer_manager.note_peer_height(peer_addr, reported_height, false);
+        node.peer_manager
+            .note_peer_height(peer_addr, reported_height, false);
 
         let mut guard = SyncGuard::new();
         timeout(
@@ -386,7 +390,6 @@ mod tests {
 
         Ok(())
     }
-
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct TxRecordArtifact {
@@ -418,10 +421,16 @@ mod tests {
         loop {
             let now = tokio::time::Instant::now();
             if now >= stall_deadline {
-                return Err(anyhow!("timeout waiting for {}: no progress before deadline", label));
+                return Err(anyhow!(
+                    "timeout waiting for {}: no progress before deadline",
+                    label
+                ));
             }
             if now >= overall_deadline {
-                return Err(anyhow!("timeout waiting for {}: overall deadline reached", label));
+                return Err(anyhow!(
+                    "timeout waiting for {}: overall deadline reached",
+                    label
+                ));
             }
 
             let (done, progress) = poll().await?;
@@ -438,7 +447,11 @@ mod tests {
         }
     }
 
-    async fn node_snapshot(node: &NodeHarness, sender: &str, recipient: &str) -> (u64, String, String, String, u128, u128, u64) {
+    async fn node_snapshot(
+        node: &NodeHarness,
+        sender: &str,
+        recipient: &str,
+    ) -> (u64, String, String, String, u128, u128, u64) {
         let guard = node.chain.lock().await;
         let tip = guard.blocks.last().unwrap();
         (
@@ -479,14 +492,26 @@ mod tests {
         assert_eq!(miner.balances, before_balances);
         assert_eq!(miner.nonces, before_nonces);
 
-        assert_eq!(apply_block(&mut miner, &block, None), AcceptResult::CanonExtension { height: 1 });
-        assert_eq!(apply_block(&mut follower, &block, None), AcceptResult::CanonExtension { height: 1 });
+        assert_eq!(
+            apply_block(&mut miner, &block, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
+        assert_eq!(
+            apply_block(&mut follower, &block, None),
+            AcceptResult::CanonExtension { height: 1 }
+        );
 
         let miner_tip = miner.blocks.last().unwrap();
         let follower_tip = follower.blocks.last().unwrap();
         assert_eq!(miner_tip.header.state_root, follower_tip.header.state_root);
-        assert_eq!(miner.balance_of(ZERO_MINER), crate::miner::job::block_reward(1));
-        assert_eq!(follower.balance_of(ZERO_MINER), crate::miner::job::block_reward(1));
+        assert_eq!(
+            miner.balance_of(ZERO_MINER),
+            crate::miner::job::block_reward(1)
+        );
+        assert_eq!(
+            follower.balance_of(ZERO_MINER),
+            crate::miner::job::block_reward(1)
+        );
         Ok(())
     }
     #[tokio::test]
@@ -555,12 +580,14 @@ mod tests {
             .await?;
         }
 
-
         let transfer = transfer_tx(11, 0, &recipient, 100, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
         let transfer_json = serde_json::to_string(&transfer)?;
         let transfer_id = canonical_tx_id(&transfer);
 
-        let api_state = miner.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let api_state = miner
+            .api_state
+            .clone()
+            .ok_or_else(|| anyhow!("missing API state"))?;
         let (status, body) = post_json(api_state, &transfer_json).await?;
         assert_eq!(status, 200);
         assert!(body.contains("\"status\":\"accepted\""));
@@ -595,8 +622,12 @@ mod tests {
         assert_eq!(txs.len(), 2);
         let follower_peer = miner.addr.to_string();
         follower.peer_manager.upsert(&follower_peer, true);
-        follower.peer_manager.set_state(&follower_peer, PeerState::Connected);
-        follower.peer_manager.note_peer_height(&follower_peer, 5, false);
+        follower
+            .peer_manager
+            .set_state(&follower_peer, PeerState::Connected);
+        follower
+            .peer_manager
+            .note_peer_height(&follower_peer, 5, false);
 
         let mut guard = SyncGuard::new();
         timeout(
@@ -694,7 +725,10 @@ mod tests {
         let transfer_json = serde_json::to_string(&transfer)?;
         let transfer_id = canonical_tx_id(&transfer);
 
-        let api_state = miner.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let api_state = miner
+            .api_state
+            .clone()
+            .ok_or_else(|| anyhow!("missing API state"))?;
         let (status, body) = post_json(api_state, &transfer_json).await?;
         assert_eq!(status, 200);
         assert!(body.contains("\"status\":\"accepted\""));
@@ -740,7 +774,6 @@ mod tests {
         sync_node_to_peer(&live_peer, &miner.addr.to_string(), 32).await?;
         let live_peer_snapshot_32 = node_snapshot(&live_peer, &sender, &recipient).await;
         assert_eq!(live_peer_snapshot_32, expected_snapshot);
-
 
         let restart_data_dir = miner.data_dir.clone();
         stop_node(miner).await;
@@ -794,7 +827,8 @@ mod tests {
         };
         persist_tx_records(&path, &[first.clone()])?;
 
-        let simulated_late_failure = Err::<(), _>(anyhow!("later stage failed after submission was recorded"));
+        let simulated_late_failure =
+            Err::<(), _>(anyhow!("later stage failed after submission was recorded"));
         assert!(simulated_late_failure.is_err());
 
         let persisted = std::fs::read_to_string(&path)?;
@@ -855,11 +889,17 @@ mod tests {
     async fn cached_state_root_height_tracks_canonical_blocks_in_status_snapshot() -> Result<()> {
         let node = start_node(true).await?;
         let tip = mine_and_apply_empty_block(&node.chain, 1, 0xA5, ZERO_MINER).await?;
-        let state = node.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let state = node
+            .api_state
+            .clone()
+            .ok_or_else(|| anyhow!("missing API state"))?;
         let snapshot = state.status_snapshot().await;
 
         assert_eq!(snapshot.cached_state_root_height, Some(1));
-        assert_eq!(snapshot.cached_state_root.as_deref(), Some(tip.header.state_root.as_str()));
+        assert_eq!(
+            snapshot.cached_state_root.as_deref(),
+            Some(tip.header.state_root.as_str())
+        );
 
         stop_node(node).await;
         Ok(())
@@ -888,9 +928,36 @@ mod tests {
             chain.nonces.insert(sender.clone(), 0);
         }
 
-        let miner_genesis = { miner.chain.lock().await.block_at(0).unwrap().hash().to_string() };
-        let follower_b_genesis = { follower_b.chain.lock().await.block_at(0).unwrap().hash().to_string() };
-        let follower_c_genesis = { follower_c.chain.lock().await.block_at(0).unwrap().hash().to_string() };
+        let miner_genesis = {
+            miner
+                .chain
+                .lock()
+                .await
+                .block_at(0)
+                .unwrap()
+                .hash()
+                .to_string()
+        };
+        let follower_b_genesis = {
+            follower_b
+                .chain
+                .lock()
+                .await
+                .block_at(0)
+                .unwrap()
+                .hash()
+                .to_string()
+        };
+        let follower_c_genesis = {
+            follower_c
+                .chain
+                .lock()
+                .await
+                .block_at(0)
+                .unwrap()
+                .hash()
+                .to_string()
+        };
         assert_eq!(miner_genesis, follower_b_genesis);
         assert_eq!(miner_genesis, follower_c_genesis);
 
@@ -908,7 +975,10 @@ mod tests {
         let transfer_json = serde_json::to_string(&transfer)?;
         let transfer_id = canonical_tx_id(&transfer);
 
-        let api_state = miner.api_state.clone().ok_or_else(|| anyhow!("missing API state"))?;
+        let api_state = miner
+            .api_state
+            .clone()
+            .ok_or_else(|| anyhow!("missing API state"))?;
         let (status, body) = post_json(api_state, &transfer_json).await?;
         assert_eq!(status, 200);
         assert!(body.contains("\"status\":\"accepted\""));
@@ -955,7 +1025,9 @@ mod tests {
         assert_eq!(miner_snapshot_5.5, 100u128);
         assert_eq!(miner_snapshot_5.6, 1u64);
 
-        follower_b.peer_manager.set_state(&miner_peer, PeerState::Disconnected);
+        follower_b
+            .peer_manager
+            .set_state(&miner_peer, PeerState::Disconnected);
 
         for height in 6..=10 {
             let _ = mine_and_apply_empty_block(
@@ -989,14 +1061,3 @@ mod tests {
         Ok(())
     }
 }
-
-
-
-
-
-
-
-
-
-
-

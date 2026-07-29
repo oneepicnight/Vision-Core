@@ -303,8 +303,12 @@ pub fn simulate_tx_execution(
         .checked_add(1)
         .ok_or(TxExecutionError::ArithmeticOverflow)?;
 
-    state.balances.insert(sender.clone(), available - total_cost);
-    state.balances.insert(args.to.clone(), new_recipient_balance);
+    state
+        .balances
+        .insert(sender.clone(), available - total_cost);
+    state
+        .balances
+        .insert(args.to.clone(), new_recipient_balance);
     state.nonces.insert(sender.clone(), next_sender_nonce);
 
     Ok(TxExecutionOutcome {
@@ -717,7 +721,10 @@ mod tests {
     fn stateless_validation_rejects_oversized_serialized_tx() {
         let mut tx = sample_tx();
         tx.args = vec![0; MAX_SERIALIZED_TX_BYTES];
-        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::TxTooLarge));
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::TxTooLarge)
+        );
     }
 
     #[test]
@@ -772,7 +779,10 @@ mod tests {
             },
             7,
         );
-        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::BadTransferArgs));
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::BadTransferArgs)
+        );
     }
 
     #[test]
@@ -804,13 +814,19 @@ mod tests {
         let signing_key = signing_key(7);
         let sender = hex::encode(signing_key.verifying_key().to_bytes());
         let tx = signed_transfer_tx(&sender, 42, MIN_CASH_TRANSFER_FEE_LIMIT);
-        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::TransferToSelf));
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::TransferToSelf)
+        );
     }
 
     #[test]
     fn stateless_validation_enforces_minimum_fee_limit() {
         let tx = signed_transfer_tx(&"bb".repeat(32), 42, MIN_CASH_TRANSFER_FEE_LIMIT - 1);
-        assert_eq!(validate_tx_stateless(&tx), Err(TxValidationError::FeeLimitTooLow));
+        assert_eq!(
+            validate_tx_stateless(&tx),
+            Err(TxValidationError::FeeLimitTooLow)
+        );
     }
 
     #[test]
@@ -819,7 +835,9 @@ mod tests {
         tx.tip += 1;
         assert_eq!(
             validate_tx_stateless(&tx),
-            Err(TxValidationError::Signature(TxSignatureError::InvalidSignature)),
+            Err(TxValidationError::Signature(
+                TxSignatureError::InvalidSignature
+            )),
         );
     }
 
@@ -853,14 +871,8 @@ mod tests {
 
     #[test]
     fn stateful_execution_rejects_first_nonce_one_for_new_account() {
-        let tx = signed_transfer_tx_with(
-            7,
-            1,
-            &"bb".repeat(32),
-            42,
-            2,
-            MIN_CASH_TRANSFER_FEE_LIMIT,
-        );
+        let tx =
+            signed_transfer_tx_with(7, 1, &"bb".repeat(32), 42, 2, MIN_CASH_TRANSFER_FEE_LIMIT);
         let sender = tx.sender_pubkey.clone();
         let mut state = TxExecutionState::new();
         state.balances.insert(sender, 100);
@@ -912,14 +924,8 @@ mod tests {
 
     #[test]
     fn stateful_execution_rejects_fee_above_fee_limit_without_mutation() {
-        let tx = signed_transfer_tx_with(
-            7,
-            0,
-            &"bb".repeat(32),
-            10,
-            250,
-            MIN_CASH_TRANSFER_FEE_LIMIT,
-        );
+        let tx =
+            signed_transfer_tx_with(7, 0, &"bb".repeat(32), 10, 250, MIN_CASH_TRANSFER_FEE_LIMIT);
         let sender = tx.sender_pubkey.clone();
         let mut state = TxExecutionState::new();
         state.balances.insert(sender, 1_000);

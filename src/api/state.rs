@@ -169,7 +169,14 @@ impl NodeApiState {
         };
 
         let mempool_size = self.mempool.len();
-        let (peer_count, durable_peer_count, active_inbound_sessions, active_outbound_sessions, transient_peer_count, dialable_peer_count) = self
+        let (
+            peer_count,
+            durable_peer_count,
+            active_inbound_sessions,
+            active_outbound_sessions,
+            transient_peer_count,
+            dialable_peer_count,
+        ) = self
             .peer_manager
             .as_ref()
             .map(|peers| {

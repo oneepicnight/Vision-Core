@@ -1,6 +1,6 @@
-﻿use serde::{Deserialize, Serialize};
 use crate::types::transaction::canonical_tx_id;
 use crate::types::{BlockHeader, Tx};
+use serde::{Deserialize, Serialize};
 
 /// A complete block: header + ordered transactions + serialised weight.
 ///
@@ -60,16 +60,16 @@ mod tests {
         Block {
             header: BlockHeader {
                 parent_hash: "00".repeat(32),
-                number:      1,
-                timestamp:   1_700_000_001,
-                difficulty:  1_000,
-                nonce:       7,
-                pow_hash:    "ab".repeat(32),
-                state_root:  "cd".repeat(32),
-                tx_root:     "0".repeat(64),
-                miner:       "0xminer".to_string(),
+                number: 1,
+                timestamp: 1_700_000_001,
+                difficulty: 1_000,
+                nonce: 7,
+                pow_hash: "ab".repeat(32),
+                state_root: "cd".repeat(32),
+                tx_root: "0".repeat(64),
+                miner: "0xminer".to_string(),
             },
-            txs:    vec![],
+            txs: vec![],
             weight: 0,
         }
     }
@@ -99,18 +99,16 @@ mod tests {
         let mut b = sample_block();
         let root_empty = b.compute_tx_root();
         b.txs.push(Tx {
-            nonce:        0,
+            nonce: 0,
             sender_pubkey: "aa".repeat(32),
-            module:       "transfer".to_string(),
-            method:       "send".to_string(),
-            args:         vec![1, 2, 3],
-            tip:          0,
-            fee_limit:    1_000,
-            sig:          "sig".to_string(),
+            module: "transfer".to_string(),
+            method: "send".to_string(),
+            args: vec![1, 2, 3],
+            tip: 0,
+            fee_limit: 1_000,
+            sig: "sig".to_string(),
         });
         let root_with_tx = b.compute_tx_root();
         assert_ne!(root_empty, root_with_tx);
     }
 }
-
-
