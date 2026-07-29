@@ -13,9 +13,6 @@ mod tests {
     use axum::extract::State;
     use ed25519_dalek::{Signer, SigningKey};
     use serde::{Deserialize, Serialize};
-    use tempfile::TempDir;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
     use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
     use tokio::time::{timeout, Duration};
@@ -76,7 +73,7 @@ mod tests {
     }
 
     async fn start_node(with_api: bool) -> Result<NodeHarness> {
-        let data_dir = tempfile::tempdir()?.into_path();
+        let data_dir = tempfile::tempdir()?.keep();
         start_node_in_dir(data_dir, with_api).await
     }
 
