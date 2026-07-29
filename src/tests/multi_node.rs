@@ -39,7 +39,6 @@ mod tests {
     struct NodeHarness {
         data_dir: PathBuf,
         addr: SocketAddr,
-        api_addr: Option<SocketAddr>,
         api_state: Option<NodeApiState>,
         chain: Arc<Mutex<ChainState>>,
         mempool: Arc<Mempool>,
@@ -105,9 +104,8 @@ mod tests {
             })
         };
 
-        let (api_addr, api_task, api_state) = if with_api {
+        let (api_task, api_state) = if with_api {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let api_addr = listener.local_addr()?;
             let state = NodeApiState::new(chain.clone(), mempool.clone())
                 .with_peer_manager(peer_manager.clone());
             let api_state = Some(state.clone());
@@ -117,15 +115,14 @@ mod tests {
                     tracing::warn!("[TEST-NODE] API server exited: {}", e);
                 }
             });
-            (Some(api_addr), Some(task), api_state)
+            (Some(task), api_state)
         } else {
-            (None, None, None)
+            (None, None)
         };
 
         Ok(NodeHarness {
             data_dir,
             addr,
-            api_addr,
             api_state,
             chain,
             mempool,
