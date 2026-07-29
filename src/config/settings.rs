@@ -127,7 +127,53 @@ fn parse_miner_address(raw: Option<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_seed_peers;
+    use std::process::{Command, Output};
+
+    use super::{parse_miner_address, parse_optional_string, parse_seed_peers, Settings};
+    use crate::config::constants::{DEFAULT_HTTP_PORT, DEFAULT_P2P_PORT, DEFAULT_SEED_PEERS};
+
+    const SETTINGS_ENV_VARS: &[&str] = &[
+        "VISION_DATA_DIR",
+        "VISION_HTTP_PORT",
+        "VISION_P2P_PORT",
+        "VISION_P2P_ADVERTISED_HOST",
+        "VISION_P2P_ADVERTISED_PORT",
+        "VISION_ALLOW_PRIVATE_PEERS",
+        "VISION_MINER_ADDRESS",
+        "VISION_MINING",
+        "VISION_MINING_THREADS",
+        "VISION_ALPHA_AIRDROP_ENABLED",
+        "VISION_SEED_PEERS",
+    ];
+    const SETTINGS_PROBE_SCENARIO: &str = "VISION_TEST_SETTINGS_PROBE_SCENARIO";
+
+    fn run_settings_probe(scenario: &str, environment: &[(&str, &str)]) -> Output {
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .arg("--exact")
+            .arg("config::settings::tests::settings_subprocess_probe")
+            .arg("--test-threads=1")
+            .env(SETTINGS_PROBE_SCENARIO, scenario);
+
+        for variable in SETTINGS_ENV_VARS {
+            command.env_remove(variable);
+        }
+        for (variable, value) in environment {
+            command.env(variable, value);
+        }
+
+        command.output().expect("settings probe should start")
+    }
+
+    fn assert_probe_succeeds(scenario: &str, environment: &[(&str, &str)]) {
+        let output = run_settings_probe(scenario, environment);
+        assert!(
+            output.status.success(),
+            "settings probe {scenario:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn parse_seed_peers_uses_defaults_when_unset() {
@@ -154,5 +200,138 @@ mod tests {
                 "192.168.1.1:9000".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parse_optional_string_trims_and_rejects_empty_values() {
+        assert_eq!(
+            parse_optional_string(Some("  peer.example  ".to_string())),
+            Some("peer.example".to_string())
+        );
+        assert_eq!(parse_optional_string(Some(" \t ".to_string())), None);
+        assert_eq!(parse_optional_string(None), None);
+    }
+
+    #[test]
+    fn parse_miner_address_accepts_only_lowercase_64_character_hex() {
+        let valid = "0123456789abcdef".repeat(4);
+        assert_eq!(parse_miner_address(Some(valid.clone())), valid);
+        assert_eq!(parse_miner_address(Some("A".repeat(64))), "0".repeat(64));
+        assert_eq!(parse_miner_address(Some("f".repeat(63))), "0".repeat(64));
+        assert_eq!(parse_miner_address(None), "0".repeat(64));
+    }
+
+    #[test]
+    fn settings_defaults_are_characterized_in_isolation() {
+        assert_probe_succeeds("defaults", &[]);
+    }
+
+    #[test]
+    fn settings_valid_environment_is_characterized_in_isolation() {
+        assert_probe_succeeds(
+            "valid",
+            &[
+                ("VISION_DATA_DIR", "custom-data"),
+                ("VISION_HTTP_PORT", "17070"),
+                ("VISION_P2P_PORT", "17072"),
+                ("VISION_P2P_ADVERTISED_HOST", " peer.example "),
+                ("VISION_P2P_ADVERTISED_PORT", "17073"),
+                ("VISION_ALLOW_PRIVATE_PEERS", "TrUe"),
+                (
+                    "VISION_MINER_ADDRESS",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                ),
+                ("VISION_MINING", "1"),
+                ("VISION_MINING_THREADS", "3"),
+                ("VISION_ALPHA_AIRDROP_ENABLED", "TRUE"),
+                ("VISION_SEED_PEERS", "127.0.0.1:17072; 127.0.0.1:17073"),
+            ],
+        );
+    }
+
+    #[test]
+    fn settings_invalid_values_use_current_fallbacks_in_isolation() {
+        assert_probe_succeeds(
+            "invalid",
+            &[
+                ("VISION_DATA_DIR", ""),
+                ("VISION_HTTP_PORT", "not-a-port"),
+                ("VISION_P2P_PORT", "70000"),
+                ("VISION_P2P_ADVERTISED_HOST", " \t "),
+                ("VISION_P2P_ADVERTISED_PORT", "0"),
+                ("VISION_ALLOW_PRIVATE_PEERS", "yes"),
+                ("VISION_MINER_ADDRESS", "ABC"),
+                ("VISION_MINING", "enabled"),
+                ("VISION_MINING_THREADS", "many"),
+                ("VISION_ALPHA_AIRDROP_ENABLED", "yes"),
+                ("VISION_SEED_PEERS", ""),
+            ],
+        );
+    }
+
+    #[test]
+    fn settings_subprocess_probe() {
+        let Ok(scenario) = std::env::var(SETTINGS_PROBE_SCENARIO) else {
+            return;
+        };
+
+        let settings = Settings::from_env();
+        match scenario.as_str() {
+            "defaults" => {
+                assert_eq!(settings.data_dir, "./data");
+                assert_eq!(settings.http_addr, format!("0.0.0.0:{DEFAULT_HTTP_PORT}"));
+                assert_eq!(settings.p2p_addr, format!("0.0.0.0:{DEFAULT_P2P_PORT}"));
+                assert_eq!(settings.p2p_advertised_host, None);
+                assert_eq!(settings.p2p_advertised_port, None);
+                assert!(settings.allow_private_peer_addresses);
+                assert_eq!(settings.miner_address, "0".repeat(64));
+                assert!(!settings.mining_enabled);
+                assert_eq!(settings.mining_threads, 0);
+                assert!(!settings.alpha_airdrop_enabled);
+                assert_eq!(
+                    settings.seed_peers,
+                    DEFAULT_SEED_PEERS
+                        .iter()
+                        .map(|peer| peer.to_string())
+                        .collect::<Vec<_>>()
+                );
+            }
+            "valid" => {
+                assert_eq!(settings.data_dir, "custom-data");
+                assert_eq!(settings.http_addr, "0.0.0.0:17070");
+                assert_eq!(settings.p2p_addr, "0.0.0.0:17072");
+                assert_eq!(
+                    settings.p2p_advertised_host,
+                    Some("peer.example".to_string())
+                );
+                assert_eq!(settings.p2p_advertised_port, Some(17073));
+                assert!(settings.allow_private_peer_addresses);
+                assert_eq!(
+                    settings.miner_address,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                );
+                assert!(settings.mining_enabled);
+                assert_eq!(settings.mining_threads, 3);
+                assert!(settings.alpha_airdrop_enabled);
+                assert_eq!(
+                    settings.seed_peers,
+                    vec!["127.0.0.1:17072".to_string(), "127.0.0.1:17073".to_string()]
+                );
+            }
+            "invalid" => {
+                assert_eq!(settings.data_dir, "");
+                assert_eq!(settings.http_addr, format!("0.0.0.0:{DEFAULT_HTTP_PORT}"));
+                assert_eq!(settings.p2p_addr, format!("0.0.0.0:{DEFAULT_P2P_PORT}"));
+                assert_eq!(settings.p2p_advertised_host, None);
+                assert_eq!(settings.p2p_advertised_port, None);
+                assert!(!settings.allow_private_peer_addresses);
+                assert_eq!(settings.miner_address, "0".repeat(64));
+                assert!(!settings.mining_enabled);
+                assert_eq!(settings.mining_threads, 0);
+                assert!(!settings.alpha_airdrop_enabled);
+                assert!(settings.seed_peers.is_empty());
+            }
+            unexpected => panic!("unexpected settings probe scenario: {unexpected}"),
+        }
     }
 }
