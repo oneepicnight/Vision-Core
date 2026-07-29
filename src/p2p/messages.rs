@@ -4,35 +4,35 @@ use serde::{Deserialize, Serialize};
 
 /// All message types exchanged between peers over the TCP P2P connection.
 ///
-/// This is the **core** message set â€” only what is needed for liveness,
+/// This is the **core** message set — only what is needed for liveness,
 /// height exchange, and block propagation. Adding a new variant is a protocol
 /// change that requires bumping `PROTOCOL_VERSION`.
 ///
 /// Encoding: bincode, length-prefixed (see `connection::send_message`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum P2PMessage {
-    // â”€â”€ Handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Handshake ─────────────────────────────────────────────────────────────
     /// First message sent on **both** sides of every new connection.
     ///
     /// Peers MUST close the connection if any field fails validation:
     /// `protocol_version`, `genesis_hash`, `chain_id`, or `econ_hash`.
     Handshake(HandshakeMessage),
 
-    // â”€â”€ Liveness â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Liveness ─────────────────────────────────────────────────────────────
     /// Keep-alive probe; carries the sender's UNIX timestamp (seconds).
     Ping { timestamp: u64 },
 
-    /// Keep-alive reply â€” MUST echo the exact `timestamp` from the Ping.
+    /// Keep-alive reply — MUST echo the exact `timestamp` from the Ping.
     Pong { timestamp: u64 },
 
-    // â”€â”€ Height exchange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Height exchange ───────────────────────────────────────────────────────
     /// Ask a peer for its current canonical chain summary.
     GetHeight,
 
     /// Response to `GetHeight`.
     Height { summary: ChainSummary },
 
-    // â”€â”€ Block propagation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Block propagation ─────────────────────────────────────────────────────
     /// Lightweight block announcement. Receivers request the full block only
     /// if they have not already seen `hash`.
     AnnounceBlock(AnnounceBlock),
@@ -40,10 +40,10 @@ pub enum P2PMessage {
     /// Request a single block by its PoW hash.
     GetBlock { hash: String },
 
-    /// Full block body â€” response to `GetBlock` or unsolicited push after mining.
+    /// Full block body — response to `GetBlock` or unsolicited push after mining.
     Block { block: Block },
 
-    // â”€â”€ Connection management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Connection management ─────────────────────────────────────────────────
     /// Graceful disconnect with a human-readable reason string.
     Disconnect { reason: String },
 }
@@ -79,7 +79,7 @@ impl P2PMessage {
     }
 }
 
-// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -93,7 +93,7 @@ mod tests {
         bincode::deserialize(&bytes).expect("deserialize")
     }
 
-    // â”€â”€ encode / decode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── encode / decode ───────────────────────────────────────────────────────
 
     #[test]
     fn ping_round_trips() {
@@ -210,7 +210,7 @@ mod tests {
         }
     }
 
-    // â”€â”€ label â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── label ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn all_variants_have_distinct_labels() {
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(P2PMessage::Pong { timestamp: 0 }.label(), "Pong");
     }
 
-    // â”€â”€ is_pre_handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── is_pre_handshake ──────────────────────────────────────────────────────
 
     #[test]
     fn only_handshake_and_disconnect_allowed_pre_handshake() {

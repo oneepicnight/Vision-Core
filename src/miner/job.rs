@@ -328,7 +328,7 @@ mod tests {
     }
     #[test]
     fn try_nonce_wrong_returns_none_at_max_difficulty() {
-        // At u64::MAX difficulty the target is effectively zero â€” no hash passes.
+        // At u64::MAX difficulty the target is effectively zero — no hash passes.
         let tip = genesis_tip();
         let now = tip.header.timestamp + TARGET_BLOCK_TIME;
         let mut job = build_candidate_with_params(

@@ -4,8 +4,8 @@ use crate::types::{BlockHeader, Tx};
 
 /// A complete block: header + ordered transactions + serialised weight.
 ///
-/// All blocks â€” whether received from peers, produced locally, or loaded
-/// from storage â€” use this single representation. There is no alternate
+/// All blocks — whether received from peers, produced locally, or loaded
+/// from storage — use this single representation. There is no alternate
 /// block type in the codebase.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Block {
@@ -21,7 +21,7 @@ pub struct Block {
 }
 
 impl Block {
-    /// Canonical block hash â€” the hex-encoded PoW hash from the header.
+    /// Canonical block hash — the hex-encoded PoW hash from the header.
     #[inline]
     pub fn hash(&self) -> &str {
         &self.header.pow_hash

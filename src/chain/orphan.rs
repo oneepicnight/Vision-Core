@@ -86,7 +86,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -172,7 +172,7 @@ mod tests {
         let b1 = make_test_block(gen.hash(), 1, ts1, 0xAA);
         let b2 = make_test_block(b1.hash(), 2, ts2, 0xBB);
 
-        // b2 arrives first â€” stored as orphan.
+        // b2 arrives first — stored as orphan.
         add_orphan(&mut g, b2.clone(), "peer1");
         assert_eq!(g.orphan_pool.len(), 1);
 

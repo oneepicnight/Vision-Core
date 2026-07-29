@@ -1,7 +1,7 @@
 use crate::config::constants::{CONSENSUS_VERSION, NETWORK_ID, NODE_VERSION, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
 
-// â”€â”€â”€ Handshake â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Handshake ────────────────────────────────────────────────────────────────
 /// Canonical chain summary advertised during P2P height polling.
 ///
 /// `cumulative_work` is a discovery hint only. A node must still fetch and
@@ -44,7 +44,7 @@ impl ChainSummary {
 /// Exchanged immediately after TCP connection establishment (both directions).
 ///
 /// Peers whose `protocol_version`, `genesis_hash`, `chain_id`, or `econ_hash`
-/// do not match MUST be disconnected immediately â€” they are on a different
+/// do not match MUST be disconnected immediately — they are on a different
 /// network, a different fork, or running incompatible economics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeMessage {
@@ -71,11 +71,11 @@ pub struct HandshakeMessage {
     /// Human-readable version tag for diagnostics only (e.g. `"v1.0.4-consensus-v1.0.3"`).
     pub node_tag: String,
 
-    /// Economics fingerprint â€” must match `ECON_HASH` on all nodes to prevent
+    /// Economics fingerprint — must match `ECON_HASH` on all nodes to prevent
     /// silently mis-matched reward schedules from forming a parallel network.
     pub econ_hash: String,
 
-    /// VisionX PoW params fingerprint â€” must match on all nodes.
+    /// VisionX PoW params fingerprint — must match on all nodes.
     pub pow_params_hash: String,
 
     /// Advertised external IP for inbound peer routing (optional).
@@ -134,7 +134,7 @@ impl HandshakeMessage {
     }
 }
 
-// â”€â”€â”€ Handshake validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Handshake validation ─────────────────────────────────────────────────────
 
 /// Outcome of validating a remote peer's handshake message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,11 +147,11 @@ pub enum HandshakeResult {
     WrongChainId,
     /// `genesis_hash` string differs from `GENESIS_HASH`.
     WrongGenesisHash,
-    /// `econ_hash` differs â€” remote runs different economics.
+    /// `econ_hash` differs — remote runs different economics.
     WrongEconHash,
-    /// `pow_params_hash` differs â€” remote uses different PoW params.
+    /// `pow_params_hash` differs — remote uses different PoW params.
     WrongPowParams,
-    /// Remote's `node_nonce` matches our own â€” self-connection detected.
+    /// Remote's `node_nonce` matches our own — self-connection detected.
     SelfConnection,
 }
 
@@ -171,7 +171,7 @@ pub fn validate_handshake(remote: &HandshakeMessage, our_nonce: u64) -> Handshak
             ours: PROTOCOL_VERSION,
         };
     }
-    // chain_id encodes genesis + network in one field â€” check it first.
+    // chain_id encodes genesis + network in one field — check it first.
     let expected_chain_id = {
         let mut input = Vec::new();
         input.extend_from_slice(GENESIS_HASH.as_bytes());
@@ -196,7 +196,7 @@ pub fn validate_handshake(remote: &HandshakeMessage, our_nonce: u64) -> Handshak
     HandshakeResult::Accepted
 }
 
-// â”€â”€â”€ Block gossip protocol â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Block gossip protocol ────────────────────────────────────────────────────
 
 /// Lightweight block announcement broadcast to all connected peers.
 ///
@@ -208,11 +208,11 @@ pub struct AnnounceBlock {
     pub height: u64,
     /// PoW hash of the announced block (hex-encoded, 64 chars).
     pub hash: String,
-    /// Parent hash â€” allows orphan detection without fetching the block first.
+    /// Parent hash — allows orphan detection without fetching the block first.
     pub prev: String,
 }
 
-// â”€â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -224,7 +224,7 @@ mod tests {
         HandshakeMessage::new(height, nonce)
     }
 
-    // â”€â”€ HandshakeMessage::new â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── HandshakeMessage::new ─────────────────────────────────────────────────
 
     #[test]
     fn new_sets_correct_protocol_version() {
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(hs.node_nonce, 7777);
     }
 
-    // â”€â”€ validate_handshake â€” happy path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── validate_handshake — happy path ───────────────────────────────────────
 
     #[test]
     fn valid_peer_is_accepted() {
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(validate_handshake(&peer, 1), HandshakeResult::Accepted);
     }
 
-    // â”€â”€ validate_handshake â€” rejection cases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── validate_handshake — rejection cases ─────────────────────────────────
 
     #[test]
     fn self_connection_detected() {
@@ -377,7 +377,7 @@ mod tests {
         );
     }
 
-    // â”€â”€ AnnounceBlock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── AnnounceBlock ─────────────────────────────────────────────────────────
 
     #[test]
     fn announce_block_serde_round_trip() {
