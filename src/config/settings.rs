@@ -319,6 +319,24 @@ mod tests {
     }
 
     #[test]
+    fn data_directory_input_is_currently_preserved_verbatim() {
+        let cases = [
+            ("", ""),
+            ("   ", "   "),
+            (" relative-data ", " relative-data "),
+            ("relative-data", "relative-data"),
+        ];
+
+        for (raw, expected) in cases {
+            let settings = Settings::from_source(&TestSettingsSource::with_values(&[(
+                "VISION_DATA_DIR",
+                raw,
+            )]));
+            assert_eq!(settings.data_dir, expected);
+        }
+    }
+
+    #[test]
     fn typed_settings_seam_preserves_valid_and_invalid_parsing() {
         let settings = Settings::from_source(&TestSettingsSource::with_values(&[
             ("VISION_DATA_DIR", ""),

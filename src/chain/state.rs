@@ -215,6 +215,8 @@ impl ChainState {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::chain::accept::apply_block;
     use crate::genesis::genesis_block;
@@ -222,6 +224,50 @@ mod tests {
     fn temp_state() -> ChainState {
         let db = sled::Config::new().temporary(true).open().unwrap();
         ChainState::empty(db)
+    }
+
+    #[test]
+    fn open_with_genesis_uses_existing_data_directory() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let data_dir_string = data_dir.path().display().to_string();
+
+        let state = ChainState::open_with_genesis(&data_dir_string).unwrap();
+        drop(state);
+
+        assert!(data_dir.path().join("chain.db").is_dir());
+    }
+
+    #[test]
+    fn open_with_genesis_creates_missing_data_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("new-data");
+        assert!(!data_dir.exists());
+
+        let state = ChainState::open_with_genesis(&data_dir.display().to_string()).unwrap();
+        drop(state);
+
+        assert!(data_dir.join("chain.db").is_dir());
+    }
+
+    #[test]
+    fn open_with_genesis_rejects_data_directory_that_is_a_file() {
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("data-file");
+        fs::write(&data_dir, b"preserve me").unwrap();
+
+        assert!(ChainState::open_with_genesis(&data_dir.display().to_string()).is_err());
+        assert_eq!(fs::read(&data_dir).unwrap(), b"preserve me");
+    }
+
+    #[test]
+    fn open_with_genesis_rejects_unusable_database_parent() {
+        let parent = tempfile::tempdir().unwrap();
+        let blocking_file = parent.path().join("blocking-file");
+        fs::write(&blocking_file, b"preserve me").unwrap();
+        let data_dir = blocking_file.join("nested-data");
+
+        assert!(ChainState::open_with_genesis(&data_dir.display().to_string()).is_err());
+        assert_eq!(fs::read(&blocking_file).unwrap(), b"preserve me");
     }
 
     #[test]

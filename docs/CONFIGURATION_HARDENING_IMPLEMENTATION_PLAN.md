@@ -190,7 +190,45 @@ decision and separate commit.
 **Estimated review difficulty:** Moderate because formerly accepted invalid
 environments will fail.
 
-### Commit 5 — Validate storage selection before opening state
+### Tranche 4A — Characterize and approve data-directory policy
+
+**Status:** Implemented locally; promotion requires review and exact-commit CI.
+
+**Purpose**
+
+Trace every `VISION_DATA_DIR` consumer, characterize current settings and
+filesystem behavior, record the approved policy, and design the
+persistence-sensitive implementation tests. Do not change production runtime
+behavior.
+
+The controlling policy for this setting is
+[VISION_DATA_DIR_POLICY.md](VISION_DATA_DIR_POLICY.md).
+
+**Expected files**
+
+- test modules in `src/config/settings.rs` and `src/chain/state.rs`;
+- `docs/VISION_DATA_DIR_POLICY.md`;
+- configuration documentation and this plan.
+
+**Risk level:** Low. Tests and documentation only.
+
+**Consensus impact:** None. No production behavior or persisted bytes change.
+
+**Validation requirements**
+
+- `cargo check --all-targets --locked`;
+- focused settings and chain-state path characterization tests;
+- formatting and Clippy;
+- full release suite because the test inventory changes;
+- `git diff --check`;
+- CI.
+
+**Rollback complexity:** Low; revert the test-and-documentation commit.
+
+**Estimated review difficulty:** Moderate. Review must keep current behavior
+separate from the approved future behavior.
+
+### Tranche 4B / Commit 5 — Validate storage selection before opening state
 
 **Purpose**
 
@@ -198,8 +236,9 @@ Define and enforce data-directory rules before sled is opened. Detect empty or
 unusable paths and report the setting and operation. Preserve the existing
 `chain.db` layout and all stored encodings.
 
-Whether an empty path is rejected and whether paths are canonicalized are owner
-decisions to settle before this commit.
+Implement the decisions in
+[VISION_DATA_DIR_POLICY.md](VISION_DATA_DIR_POLICY.md). Do not expand them
+during implementation.
 
 **Expected files**
 

@@ -23,6 +23,11 @@ does not endorse or change it.
 | `VISION_ALPHA_AIRDROP_ENABLED` | `1`, `true`, or another string | `false` | Only case-insensitive `true` or `1` means true; every present other value means false | Yes |
 | `VISION_SEED_PEERS` | Comma, semicolon, or newline-delimited addresses | Compiled `DEFAULT_SEED_PEERS` | Entries are trimmed; empty entries are removed; an explicitly empty string produces an empty list | Yes |
 
+The approved data-directory policy and the boundary between characterized
+current behavior and future validation are defined in
+[VISION_DATA_DIR_POLICY.md](VISION_DATA_DIR_POLICY.md). Tranche 4A does not
+change runtime behavior.
+
 `RUST_LOG` is consumed by `tracing-subscriber`, not by `Settings`. It accepts a
 standard tracing filter such as `vision_core=debug`; when missing or invalid,
 the node uses `info`.
