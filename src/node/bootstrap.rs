@@ -1,3 +1,9 @@
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use anyhow::{anyhow, Result};
 
 use crate::chain::accept::{apply_block, AcceptResult};
@@ -8,6 +14,194 @@ use crate::chain::storage::{
 use crate::chain::ChainState;
 use crate::config::settings::Settings;
 use crate::genesis::genesis::{genesis_block, validate_genesis_hash, verify_stored_genesis};
+
+static DATA_DIRECTORY_PROBE_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+enum DataDirectoryError {
+    InvalidValue {
+        value: String,
+        requirement: &'static str,
+    },
+    Filesystem {
+        value: String,
+        effective: PathBuf,
+        operation: &'static str,
+        source: io::Error,
+    },
+    DatabaseOpen {
+        value: String,
+        effective: PathBuf,
+        source: anyhow::Error,
+    },
+}
+
+impl fmt::Display for DataDirectoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidValue { value, requirement } => write!(
+                formatter,
+                "invalid VISION_DATA_DIR value {value:?}: {requirement}"
+            ),
+            Self::Filesystem {
+                value,
+                effective,
+                operation,
+                source,
+            } => write!(
+                formatter,
+                "invalid VISION_DATA_DIR value {value:?}: could not {operation} effective data directory {}: {source}",
+                effective.display()
+            ),
+            Self::DatabaseOpen {
+                value,
+                effective,
+                source,
+            } => write!(
+                formatter,
+                "invalid VISION_DATA_DIR value {value:?}: could not open database in effective data directory {}: {source}",
+                effective.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DataDirectoryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Filesystem { source, .. } => Some(source),
+            Self::InvalidValue { .. } | Self::DatabaseOpen { .. } => None,
+        }
+    }
+}
+
+fn data_directory_io_error(
+    value: &str,
+    effective: &Path,
+    operation: &'static str,
+    source: io::Error,
+) -> DataDirectoryError {
+    DataDirectoryError::Filesystem {
+        value: value.to_string(),
+        effective: effective.to_path_buf(),
+        operation,
+        source,
+    }
+}
+
+fn prepare_data_directory(value: &str) -> std::result::Result<PathBuf, DataDirectoryError> {
+    let current_directory = std::env::current_dir().map_err(|source| {
+        data_directory_io_error(
+            value,
+            Path::new(value),
+            "resolve the process working directory for",
+            source,
+        )
+    })?;
+    prepare_data_directory_from(value, &current_directory)
+}
+
+fn prepare_data_directory_from(
+    value: &str,
+    current_directory: &Path,
+) -> std::result::Result<PathBuf, DataDirectoryError> {
+    if value.is_empty() {
+        return Err(DataDirectoryError::InvalidValue {
+            value: value.to_string(),
+            requirement: "expected a non-empty path",
+        });
+    }
+    if value.trim().is_empty() {
+        return Err(DataDirectoryError::InvalidValue {
+            value: value.to_string(),
+            requirement: "expected a path containing non-whitespace characters",
+        });
+    }
+    if value.trim() != value {
+        return Err(DataDirectoryError::InvalidValue {
+            value: value.to_string(),
+            requirement: "leading and trailing whitespace are not allowed",
+        });
+    }
+
+    let configured = Path::new(value);
+    let effective = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        current_directory.join(configured)
+    };
+
+    match fs::metadata(&effective) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(DataDirectoryError::InvalidValue {
+                value: value.to_string(),
+                requirement: "the effective path must be a directory, not a regular file",
+            });
+        }
+        Ok(_) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let parent = effective
+                .parent()
+                .ok_or_else(|| DataDirectoryError::InvalidValue {
+                    value: value.to_string(),
+                    requirement: "the effective path must have an existing parent directory",
+                })?;
+            let parent_metadata = fs::metadata(parent).map_err(|source| {
+                data_directory_io_error(value, &effective, "inspect the parent of", source)
+            })?;
+            if !parent_metadata.is_dir() {
+                return Err(DataDirectoryError::InvalidValue {
+                    value: value.to_string(),
+                    requirement: "the effective path must have a directory as its parent",
+                });
+            }
+            fs::create_dir(&effective)
+                .map_err(|source| data_directory_io_error(value, &effective, "create", source))?;
+        }
+        Err(source) => {
+            return Err(data_directory_io_error(
+                value, &effective, "inspect", source,
+            ));
+        }
+    }
+
+    fs::read_dir(&effective)
+        .map_err(|source| data_directory_io_error(value, &effective, "access", source))?;
+
+    let database_path = effective.join("chain.db");
+    match fs::metadata(&database_path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(DataDirectoryError::InvalidValue {
+                value: value.to_string(),
+                requirement: "the effective chain.db path must be a directory",
+            });
+        }
+        Ok(_) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(data_directory_io_error(
+                value,
+                &effective,
+                "inspect chain.db under",
+                source,
+            ));
+        }
+    }
+
+    let probe_id = DATA_DIRECTORY_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    let probe_path = effective.join(format!(
+        ".vision-core-write-probe-{}-{probe_id}",
+        std::process::id()
+    ));
+    fs::create_dir(&probe_path).map_err(|source| {
+        data_directory_io_error(value, &effective, "verify write access to", source)
+    })?;
+    fs::remove_dir(&probe_path).map_err(|source| {
+        data_directory_io_error(value, &effective, "remove the write probe from", source)
+    })?;
+
+    Ok(effective)
+}
 
 /// Initialise the chain from scratch or verify an existing database.
 ///
@@ -180,7 +374,18 @@ fn rebuild_canonical_state_from_genesis(g: &mut ChainState) -> Result<u64> {
 /// stored canonical tail so balances, nonces, cached state root, and the
 /// canonical tip are restored before sync or API requests start.
 pub fn initialize_chain_state(settings: &Settings) -> Result<ChainState> {
-    let mut chain_state = ChainState::open_with_genesis(&settings.data_dir)?;
+    let effective_data_directory = prepare_data_directory(&settings.data_dir)?;
+    tracing::info!(
+        "[STORAGE] Effective data directory: {}",
+        effective_data_directory.display()
+    );
+    let mut chain_state = ChainState::open_with_genesis(&settings.data_dir).map_err(|source| {
+        DataDirectoryError::DatabaseOpen {
+            value: settings.data_dir.clone(),
+            effective: effective_data_directory,
+            source,
+        }
+    })?;
     bootstrap_chain(&mut chain_state, settings)?;
     chain_state.refresh_cached_state_root_from_tip();
 
@@ -228,6 +433,7 @@ mod tests {
     use crate::chain::state::ChainState;
     use crate::config::constants::TARGET_BLOCK_TIME;
     use crate::genesis::genesis_block;
+    use std::fs;
     use std::path::Path;
     use std::process::Command;
 
@@ -337,6 +543,139 @@ mod tests {
             }
         }
         map
+    }
+
+    #[test]
+    fn data_directory_policy_preserves_default_relative_path() -> Result<()> {
+        let current_directory = tempfile::tempdir()?;
+
+        let effective = prepare_data_directory_from("./data", current_directory.path())?;
+
+        assert_eq!(effective, current_directory.path().join("./data"));
+        assert!(effective.is_dir());
+        assert!(!effective.join("chain.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_policy_rejects_empty_whitespace_and_padded_values() -> Result<()> {
+        let current_directory = tempfile::tempdir()?;
+
+        for value in ["", "   ", " relative-data", "relative-data "] {
+            let error = prepare_data_directory_from(value, current_directory.path())
+                .expect_err("explicit invalid data directory should be rejected");
+            let message = error.to_string();
+            assert!(message.contains("VISION_DATA_DIR"));
+            assert!(message.contains(&format!("{value:?}")));
+        }
+
+        assert_eq!(fs::read_dir(current_directory.path())?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_policy_resolves_relative_path_without_opening_database() -> Result<()> {
+        let current_directory = tempfile::tempdir()?;
+
+        let effective = prepare_data_directory_from("relative-data", current_directory.path())?;
+
+        assert_eq!(effective, current_directory.path().join("relative-data"));
+        assert!(effective.is_dir());
+        assert!(!effective.join("chain.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_policy_accepts_existing_directory_without_replacing_it() -> Result<()> {
+        let data_directory = tempfile::tempdir()?;
+        let marker = data_directory.path().join("marker");
+        fs::write(&marker, b"preserve me")?;
+
+        let effective = prepare_data_directory_from(
+            &data_directory.path().display().to_string(),
+            Path::new("unused"),
+        )?;
+
+        assert_eq!(effective, data_directory.path());
+        assert_eq!(fs::read(marker)?, b"preserve me");
+        assert!(!effective.join("chain.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_policy_rejects_regular_file_without_modifying_it() -> Result<()> {
+        let parent = tempfile::tempdir()?;
+        let data_file = parent.path().join("data-file");
+        fs::write(&data_file, b"preserve me")?;
+
+        let error =
+            prepare_data_directory_from(&data_file.display().to_string(), Path::new("unused"))
+                .expect_err("regular file must not be accepted as a data directory");
+
+        assert!(error.to_string().contains("must be a directory"));
+        assert_eq!(fs::read(data_file)?, b"preserve me");
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_policy_rejects_missing_parent_without_fallback() -> Result<()> {
+        let current_directory = tempfile::tempdir()?;
+        let configured = "missing-parent/data";
+
+        let error = prepare_data_directory_from(configured, current_directory.path())
+            .expect_err("a missing parent directory must be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("VISION_DATA_DIR"));
+        assert!(message.contains(configured));
+        assert!(!current_directory.path().join("missing-parent").exists());
+        assert!(!current_directory.path().join("data").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn data_directory_policy_rejects_regular_file_at_chain_db_path() -> Result<()> {
+        let data_directory = tempfile::tempdir()?;
+        let database_file = data_directory.path().join("chain.db");
+        fs::write(&database_file, b"preserve me")?;
+
+        let error = prepare_data_directory_from(
+            &data_directory.path().display().to_string(),
+            Path::new("unused"),
+        )
+        .expect_err("regular chain.db file must be rejected");
+
+        assert!(error.to_string().contains("chain.db"));
+        assert_eq!(fs::read(database_file)?, b"preserve me");
+        Ok(())
+    }
+
+    #[test]
+    fn initialize_chain_state_opens_only_the_validated_directory() -> Result<()> {
+        let data_directory = tempfile::tempdir()?;
+        let settings = test_settings(data_directory.path());
+
+        let chain = initialize_chain_state(&settings)?;
+
+        assert_eq!(chain.current_height(), 0);
+        assert!(data_directory.path().join("chain.db").is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn initialize_chain_state_rejects_explicit_empty_before_database_open() -> Result<()> {
+        let fallback_guard = tempfile::tempdir()?;
+        let mut settings = test_settings(fallback_guard.path());
+        settings.data_dir.clear();
+
+        let error = match initialize_chain_state(&settings) {
+            Ok(_) => panic!("explicitly empty VISION_DATA_DIR should fail before storage opens"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("VISION_DATA_DIR"));
+        assert!(!fallback_guard.path().join("chain.db").exists());
+        Ok(())
     }
 
     #[test]
