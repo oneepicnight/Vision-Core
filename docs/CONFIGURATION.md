@@ -27,6 +27,14 @@ does not endorse or change it.
 standard tracing filter such as `vision_core=debug`; when missing or invalid,
 the node uses `info`.
 
+`TOKIO_WORKER_THREADS` is consumed before `Settings` while the asynchronous
+runtime is constructed. When missing, it uses the number of available logical
+CPUs, with the existing platform fallback of four. A present value must be a
+positive `usize` integer with no surrounding whitespace. Zero, malformed,
+negative, whitespace-padded, and overflowing values stop startup before the
+Tokio runtime is constructed. The error identifies the variable, rejected
+value, and positive-integer requirement.
+
 ## Address construction
 
 The HTTP and P2P listen settings are built as `0.0.0.0:<port>`. The current

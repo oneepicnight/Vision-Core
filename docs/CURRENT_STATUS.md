@@ -2,10 +2,10 @@
 
 ## Status Date
 
-2026-07-29, America/New_York.
+2026-07-30, America/New_York.
 
-This file describes both the authoritative public release and the separate
-local Developer Readiness line. They must not be conflated.
+This file distinguishes the immutable v1.0.4 release tag from the current
+authoritative `main` development baseline. They must not be conflated.
 
 ## Authoritative Release
 
@@ -21,31 +21,27 @@ Historical tags remain immutable. `vision-core-consensus-v1.0.3` and `vision-cor
 
 ## Current Development Line
 
-- Branch: `dev/dead-code-cleanup-v104`
-- Current committed development commit: `b83240dec488726c896353f34b25f8f3600b6859`
-- Committed tree before the Project Intelligence Layer: `974f928832630a53830583a5847643e62ba49885`
-- Project Intelligence Layer: uncommitted documentation-only work
+- Long-lived integration branch: `dev/configuration-hardening-v104`
+- Current promoted code baseline:
+  `cbaf619b5420ee90c4b8dedb208699566cf0e182`
+- Promoted code tree: `b21b6e20be2963971d81f06010cc4ef50247b9a1`
+- Current `origin/main`: `cbaf619b5420ee90c4b8dedb208699566cf0e182`
 
-The development line contains post-release Developer Readiness changes. It is
-not part of `origin/main` until separately reviewed, pushed, and promoted.
+Configuration Hardening review uses short-lived per-tranche branches. Tranche 3
+was reviewed through pull request #4 and promoted to `main` by normal
+fast-forward.
 
 ## Current Validation Baseline
 
-The latest completed Tranche 3A/3B evidence records:
+The latest completed Configuration Hardening Tranche 3 evidence records:
 
-- tests discovered: 506;
-- passed: 505;
+- tests discovered: 521;
+- passed: 520;
 - failed: 0;
 - ignored: 1;
 - focused watchdog: 1 passed, 0 failed;
 - VisionX module: 32 passed, 0 failed;
-- storage: 9 passed;
-- bootstrap/recovery: 5 passed, 1 ignored;
-- restart persistence: 1 passed;
-- reorganization: 16 passed;
-- snapshots: 17 passed;
-- state-root: 10 passed;
-- ChainState: 12 passed;
+- focused runtime/startup tests: 7 passed, 0 failed;
 - formatting: clean.
 
 The sole ignored test is `node::bootstrap::tests::bootstrap_recovery_worker`.
@@ -103,6 +99,20 @@ Warnings have been classified. The totals are not blanket authorization to delet
 - `#[test]` restored on `cumulative_work_single_block`;
 - four unread, non-persisted ChainState mempool fields removed in one isolated commit;
 - focused, release, VisionX, persistence, restart, reorganization, snapshot, and state-root validation completed.
+
+### Configuration Hardening
+
+- current configuration and runtime-thread behavior characterized before
+  behavior changes;
+- source-neutral typed settings translation seam introduced without changing
+  configuration behavior;
+- invalid `TOKIO_WORKER_THREADS` values now fail before Tokio runtime
+  construction with an actionable structured error;
+- missing runtime-thread configuration retains logical-CPU selection;
+- positive integer runtime-thread configuration remains accepted;
+- Tranche 3 commit `cbaf619b5420ee90c4b8dedb208699566cf0e182`
+  passed pull-request CI and post-promotion `main` CI before the short-lived
+  review branch was retired.
 
 ## Remaining Technical Debt
 

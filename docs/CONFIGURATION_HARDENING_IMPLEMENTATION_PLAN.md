@@ -47,6 +47,9 @@ Hardening commit.
 
 ### Commit 1 — Characterize current configuration behavior
 
+**Status:** Completed and promoted as
+`5d9c2789256ee9b390a2a348c3a875fa830a74b7`.
+
 **Purpose**
 
 Add deterministic tests for current parsers, defaults, invalid-value fallback,
@@ -78,6 +81,9 @@ global environment in parallel tests.
 characterize current behavior rather than encode the desired future behavior.
 
 ### Commit 2 — Introduce a source-neutral typed settings parser
+
+**Status:** Completed and promoted as
+`a2b5e208ecc98b188e866420a932d4bd03b0a426`.
 
 **Purpose**
 
@@ -113,6 +119,9 @@ only.
 every current setting.
 
 ### Commit 3 — Validate Tokio runtime thread configuration
+
+**Status:** Completed and promoted as
+`cbaf619b5420ee90c4b8dedb208699566cf0e182`.
 
 **Purpose**
 
