@@ -1,21 +1,58 @@
+use std::fmt;
+
 use tokio::runtime::{Builder, Runtime};
+
+#[derive(Debug)]
+pub enum RuntimeError {
+    InvalidWorkerThreads { value: String },
+    Build(std::io::Error),
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidWorkerThreads { value } => write!(
+                formatter,
+                "invalid TOKIO_WORKER_THREADS value {value:?}: expected a positive integer"
+            ),
+            Self::Build(error) => write!(formatter, "failed to build Tokio runtime: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidWorkerThreads { .. } => None,
+            Self::Build(error) => Some(error),
+        }
+    }
+}
 
 /// Build the Tokio multi-thread runtime used for all async tasks.
 ///
 /// Thread count defaults to the number of logical CPUs. Override with
 /// `TOKIO_WORKER_THREADS` environment variable.
-pub fn build_runtime() -> Runtime {
-    let threads = std::env::var("TOKIO_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(num_cpus);
+pub fn build_runtime() -> Result<Runtime, RuntimeError> {
+    let threads = parse_worker_threads(std::env::var("TOKIO_WORKER_THREADS").ok())?;
 
     Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
         .thread_name("vision-worker")
         .build()
-        .expect("Failed to build Tokio runtime")
+        .map_err(RuntimeError::Build)
+}
+
+fn parse_worker_threads(raw: Option<String>) -> Result<usize, RuntimeError> {
+    let Some(value) = raw else {
+        return Ok(num_cpus());
+    };
+
+    match value.parse::<usize>() {
+        Ok(threads) if threads > 0 => Ok(threads),
+        _ => Err(RuntimeError::InvalidWorkerThreads { value }),
+    }
 }
 
 fn num_cpus() -> usize {
@@ -29,7 +66,7 @@ fn num_cpus() -> usize {
 mod tests {
     use std::process::{Command, Output};
 
-    use super::build_runtime;
+    use super::{build_runtime, parse_worker_threads};
 
     const RUNTIME_PROBE_SCENARIO: &str = "VISION_TEST_RUNTIME_PROBE_SCENARIO";
 
@@ -38,6 +75,7 @@ mod tests {
         command
             .arg("--exact")
             .arg("node::runtime::tests::runtime_subprocess_probe")
+            .arg("--nocapture")
             .arg("--test-threads=1")
             .env(RUNTIME_PROBE_SCENARIO, "build")
             .env_remove("TOKIO_WORKER_THREADS");
@@ -70,25 +108,57 @@ mod tests {
     }
 
     #[test]
-    fn runtime_invalid_worker_thread_override_uses_current_fallback() {
-        assert_probe_succeeds(Some("invalid"));
+    fn runtime_rejects_malformed_worker_thread_override() {
+        let output = run_runtime_probe(Some("invalid"));
+        assert_probe_rejected(&output, "invalid");
     }
 
     #[test]
-    fn runtime_zero_worker_thread_override_hits_current_build_failure_boundary() {
+    fn runtime_rejects_zero_worker_thread_override() {
         let output = run_runtime_probe(Some("0"));
-        assert!(
-            !output.status.success(),
-            "zero worker-thread probe unexpectedly succeeded"
+        assert_probe_rejected(&output, "0");
+    }
+
+    #[test]
+    fn worker_thread_parser_rejects_negative_whitespace_and_overflow_values() {
+        for value in [
+            "-1",
+            " 2 ",
+            "18446744073709551616",
+            "999999999999999999999999999999999999999999",
+        ] {
+            let error = parse_worker_threads(Some(value.to_string()))
+                .expect_err("invalid worker-thread value should be rejected");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid TOKIO_WORKER_THREADS value {value:?}: expected a positive integer"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn worker_thread_parser_accepts_positive_bounds() {
+        assert_eq!(parse_worker_threads(Some("1".to_string())).unwrap(), 1);
+        assert_eq!(
+            parse_worker_threads(Some(usize::MAX.to_string())).unwrap(),
+            usize::MAX
         );
+    }
+
+    fn assert_probe_rejected(output: &Output, value: &str) {
+        assert!(!output.status.success(), "probe unexpectedly succeeded");
         let output_text = format!(
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            output_text.contains("Worker threads cannot be set to 0"),
-            "zero worker-thread failure did not identify the boundary\noutput:\n{output_text}"
+            output_text.contains(&format!(
+                "invalid TOKIO_WORKER_THREADS value {value:?}: expected a positive integer"
+            )),
+            "worker-thread failure did not identify the invalid setting\noutput:\n{output_text}"
         );
     }
 
@@ -98,6 +168,12 @@ mod tests {
             return;
         };
         assert_eq!(scenario, "build");
-        drop(build_runtime());
+        match build_runtime() {
+            Ok(runtime) => drop(runtime),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
     }
 }

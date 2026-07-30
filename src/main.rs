@@ -31,7 +31,13 @@ use config::constants::*;
 use config::settings::Settings;
 
 fn main() {
-    let rt = node::runtime::build_runtime();
+    let rt = match node::runtime::build_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Fatal: {error}");
+            std::process::exit(1);
+        }
+    };
     if let Err(e) = rt.block_on(async_main()) {
         tracing::error!("Fatal: {}", e);
         std::process::exit(1);
