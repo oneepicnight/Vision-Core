@@ -2,11 +2,11 @@
 
 ## Status
 
-Approved policy for Configuration Hardening Tranche 4.
+Implemented policy for Configuration Hardening Tranche 4.
 
-Tranche 4A records and tests the current behavior. It does not implement this
-policy. Tranche 4B requires separate authorization before changing runtime
-behavior.
+Tranche 4A recorded and tested the prior behavior without changing runtime
+semantics. Tranche 4B implemented this policy and was promoted as
+`b23ca0c53706c095acb0dd48b5ab5593166ac8ab`.
 
 ## Scope
 
@@ -18,7 +18,7 @@ consensus rules or stored encodings.
 An explicitly supplied but invalid `VISION_DATA_DIR` must never fall back to
 the default location.
 
-## Current Behavior Characterized by Tranche 4A
+## Prior Behavior Characterized by Tranche 4A
 
 - A missing value becomes `./data`.
 - Every present string is preserved verbatim, including an empty string,
@@ -40,9 +40,10 @@ the default location.
   because supported non-Windows platforms remain an Owner Decision Required
   item and Windows access-control behavior depends on the executing account.
 
-These statements describe existing behavior; they do not endorse it.
+These statements describe behavior before Tranche 4B; they do not describe the
+current validated startup boundary.
 
-## Approved Tranche 4B Policy
+## Implemented Tranche 4B Policy
 
 ### Missing input
 
@@ -97,9 +98,9 @@ effective data directory clearly before opening `chain.db`.
 Return a structured startup error for invalid or unusable input. Do not panic,
 fall back to another directory, or continue starting services.
 
-## Tranche 4B Test Design
+## Tranche 4B Validation Record
 
-The implementation tranche must include deterministic tests for:
+The implementation and validation covered:
 
 - missing input retaining `./data`;
 - empty, whitespace-only, and padded values being rejected;
@@ -116,8 +117,17 @@ The implementation tranche must include deterministic tests for:
 - errors occurring before storage initialization and service startup;
 - no fallback database being created after explicit invalid input.
 
-Run storage, restart, reorganization, snapshot, state-root, full release, and
-CI validation against the exact Tranche 4B candidate.
+Validation against the exact Tranche 4B candidate recorded:
+
+- focused data-directory tests: 11 passed;
+- storage tests: 9 passed;
+- bootstrap/restart tests: 14 passed, 1 ignored;
+- reorganization tests: 16 passed;
+- snapshot tests: 17 passed;
+- state-root tests: 10 passed;
+- full release suite: 534 passed, 0 failed, 1 ignored;
+- pull-request CI run `30588116415`: passed;
+- post-promotion `main` CI run `30590200588`: passed.
 
 ## Non-Goals
 

@@ -23,25 +23,31 @@ Historical tags remain immutable. `vision-core-consensus-v1.0.3` and `vision-cor
 
 - Long-lived integration branch: `dev/configuration-hardening-v104`
 - Current promoted code baseline:
-  `cbaf619b5420ee90c4b8dedb208699566cf0e182`
-- Promoted code tree: `b21b6e20be2963971d81f06010cc4ef50247b9a1`
-- Current `origin/main`: `cbaf619b5420ee90c4b8dedb208699566cf0e182`
+  `b23ca0c53706c095acb0dd48b5ab5593166ac8ab`
+- Promoted code tree: `0bb6f9854972dab20babe5b4bccd67b6a24dbebd`
+- Current `origin/main`: `b23ca0c53706c095acb0dd48b5ab5593166ac8ab`
 
-Configuration Hardening review uses short-lived per-tranche branches. Tranche 3
-was reviewed through pull request #4 and promoted to `main` by normal
-fast-forward.
+Configuration Hardening review uses short-lived per-tranche branches. Tranche
+4B was reviewed through pull request #7 and promoted to `main` by normal
+fast-forward. The long-lived local and remote integration branches are
+synchronized with that promoted commit.
 
 ## Current Validation Baseline
 
-The latest completed Configuration Hardening Tranche 3 evidence records:
+The latest completed Configuration Hardening Tranche 4B evidence records:
 
-- tests discovered: 521;
-- passed: 520;
+- tests discovered: 535;
+- passed: 534;
 - failed: 0;
 - ignored: 1;
 - focused watchdog: 1 passed, 0 failed;
 - VisionX module: 32 passed, 0 failed;
-- focused runtime/startup tests: 7 passed, 0 failed;
+- focused data-directory tests: 11 passed, 0 failed;
+- storage tests: 9 passed, 0 failed;
+- bootstrap/restart tests: 14 passed, 0 failed, 1 ignored;
+- reorganization tests: 16 passed, 0 failed;
+- snapshot tests: 17 passed, 0 failed;
+- state-root tests: 10 passed, 0 failed;
 - formatting: clean.
 
 The sole ignored test is `node::bootstrap::tests::bootstrap_recovery_worker`.
@@ -51,7 +57,7 @@ These totals describe the recorded developer-line validation. They are not copie
 ## Warning Baseline
 
 - Tranche 2 baseline: 58 normal-target warnings and 34 test-target warnings.
-- Current post-Tranche 3 baseline: 58 normal-target warnings and 31 test-target warnings.
+- Current post-Tranche 4B baseline: 58 normal-target warnings and 30 test-target warnings.
 - Formatting baseline: clean.
 - Clippy: intentionally non-blocking while classified debt remains.
 
@@ -62,6 +68,11 @@ single-block cumulative-work test to the discovered test inventory. The normal
 binary warning count remained 58 because the removed findings were specific to
 test or test-expanded compilation. This is a measured baseline transition, not
 an unexplained recount or authorization for further warning removal.
+
+The later reduction from 31 to 30 test-target warnings was first recorded by
+the Configuration Hardening characterization baseline. Its deterministic
+settings/runtime tests made one previously dead test-expanded path reachable;
+no lint suppression or production-code removal produced that reduction.
 
 Warnings have been classified. The totals are not blanket authorization to delete code or suppress diagnostics.
 
@@ -113,10 +124,20 @@ Warnings have been classified. The totals are not blanket authorization to delet
 - Tranche 3 commit `cbaf619b5420ee90c4b8dedb208699566cf0e182`
   passed pull-request CI and post-promotion `main` CI before the short-lived
   review branch was retired.
+- Tranche 4A commit `8089c046bc7193ac1863b81e7502c0808769b7a3`
+  characterized existing `VISION_DATA_DIR` behavior and established the
+  approved persistence-sensitive policy without changing runtime behavior;
+- Tranche 4B commit `b23ca0c53706c095acb0dd48b5ab5593166ac8ab`
+  validates the effective data directory before storage initialization,
+  rejects explicitly invalid or unusable locations without fallback, reports
+  the effective location, and preserves valid paths and the existing
+  `chain.db` layout;
+- Tranche 4B passed pull-request CI run `30588116415` and post-promotion
+  `main` CI run `30590200588` before its short-lived review branch was retired.
 
 ## Remaining Technical Debt
 
-- invalid configuration values can silently fall back to defaults;
+- invalid scalar configuration values can still silently fall back to defaults;
 - `VISION_CONFIG` is documented but not implemented;
 - `VISION_MINING_THREADS` is parsed but not consumed;
 - private-peer policy defaults permissive;
@@ -166,10 +187,12 @@ remains in the linked policy or ledger.
 | OD-11 | Define emergency chain and database incident-recovery authority and procedures. | [ENGINEERING_PLAYBOOK.md](ENGINEERING_PLAYBOOK.md) |
 | OD-12 | Approve the exact scope and compatibility classification of the planned Vision-Core v1.1.0 milestone. | [ROADMAP.md](ROADMAP.md) |
 
-## Approved Next Task: Configuration Hardening
+## Current Work: Configuration Hardening
 
-Configuration Hardening is the currently approved next engineering task after
-the Developer Readiness stack is reviewed, pushed, and promoted.
+Configuration Hardening is active on `dev/configuration-hardening-v104`.
+Tranches 1 through 4B are promoted. No later tranche is authorized by this
+status record; the next scope requires a roadmap review and explicit owner
+authorization.
 
 Its intended scope includes:
 
@@ -180,14 +203,8 @@ Its intended scope includes:
 - making private-peer policy explicit;
 - documenting accepted values and operator migration.
 
-This task intentionally changes runtime startup behavior. Existing invalid configurations that currently fall back may begin failing visibly. It must therefore not begin on top of an unreviewed local documentation and cleanup stack.
-
-Required order:
-
-1. review the Developer Readiness commits and Project Intelligence Layer;
-2. commit the documentation in an authorized scope;
-3. push and promote the reviewed Developer Readiness stack;
-4. establish the exact Configuration Hardening branch and scope;
-5. implement configuration changes in isolated commits;
-6. run fresh startup, configuration, release, watchdog, VisionX, and applicable node validation;
-7. publish migration notes before promotion.
+Later work may intentionally change runtime startup behavior for other invalid
+settings that still fall back. Each behavior change requires its own
+authorization, isolated commit, applicable focused and full validation,
+short-lived review branch, pull-request CI, promotion gate, and documentation
+closeout.

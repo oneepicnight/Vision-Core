@@ -192,7 +192,8 @@ environments will fail.
 
 ### Tranche 4A — Characterize and approve data-directory policy
 
-**Status:** Implemented locally; promotion requires review and exact-commit CI.
+**Status:** Completed and promoted as
+`8089c046bc7193ac1863b81e7502c0808769b7a3`.
 
 **Purpose**
 
@@ -230,6 +231,9 @@ separate from the approved future behavior.
 
 ### Tranche 4B / Commit 5 — Validate storage selection before opening state
 
+**Status:** Completed and promoted as
+`b23ca0c53706c095acb0dd48b5ab5593166ac8ab`.
+
 **Purpose**
 
 Define and enforce data-directory rules before sled is opened. Detect empty or
@@ -246,6 +250,11 @@ during implementation.
 - `src/node/bootstrap.rs`;
 - focused settings/startup tests;
 - persistence test helpers only where required to exercise failure safely.
+
+The promoted implementation remained entirely in `src/node/bootstrap.rs`.
+Private validation helpers and their tests were colocated with the storage
+startup boundary; no public settings API or additional module required a
+change.
 
 **Risk level:** Medium to high.
 
@@ -270,6 +279,20 @@ the environment.
 
 **Estimated review difficulty:** High because path semantics and startup order
 must remain cross-platform safe.
+
+**Completion evidence**
+
+- focused data-directory tests: 11 passed;
+- storage tests: 9 passed;
+- bootstrap/restart tests: 14 passed, 1 ignored;
+- reorganization tests: 16 passed;
+- snapshot tests: 17 passed;
+- state-root tests: 10 passed;
+- focused watchdog: 1 passed;
+- VisionX: 32 passed;
+- full release suite: 534 passed, 0 failed, 1 ignored;
+- pull-request CI run `30588116415`: passed;
+- post-promotion `main` CI run `30590200588`: passed.
 
 ### Commit 6 — Validate P2P identity and seed configuration
 

@@ -102,7 +102,7 @@ changes require explicit owner decisions.
 Follow:
 
 1. [Current Configuration](CONFIGURATION.md)
-2. [Current Status: Approved Next Task](CURRENT_STATUS.md#approved-next-task-configuration-hardening)
+2. [Current Configuration Hardening status](CURRENT_STATUS.md#current-work-configuration-hardening)
 3. [Consensus Boundaries: Configuration](CONSENSUS_BOUNDARIES.md#configuration)
 4. [Configuration Hardening Workflow](ENGINEERING_PLAYBOOK.md#configuration-hardening-workflow)
 5. [Testing Policy](TESTING_POLICY.md)
@@ -240,15 +240,11 @@ Phase I established the Vision-Core engineering operating system:
 Phase I documentation is complete. Maintain it as living documentation when
 code, policy, owner decisions, or release state changes.
 
-The next sequence is:
+The Developer Readiness stack and Configuration Hardening Tranches 1 through
+4B are promoted. Read [CURRENT_STATUS.md](CURRENT_STATUS.md) for the exact
+authoritative commit, validation baseline, completed work, and current
+authorization boundary.
 
-1. complete the final promotion audit of the Developer Readiness stack;
-2. push `dev/dead-code-cleanup-v104`;
-3. allow GitHub Actions to validate the pushed branch;
-4. review CI results;
-5. fast-forward `main` only after explicit authorization;
-6. create a fresh branch from updated `main`;
-7. begin Configuration Hardening.
-
-This sequence states current owner intent. It does not itself authorize a push,
-promotion, branch creation, or Configuration Hardening implementation.
+No later Configuration Hardening tranche is authorized by this index. Review
+the remaining implementation plan and obtain explicit owner authorization
+before selecting or implementing the next scope.

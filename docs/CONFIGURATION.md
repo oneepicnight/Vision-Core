@@ -4,14 +4,15 @@ Vision-Core v1.0.4 reads runtime settings from environment variables when
 `Settings::from_env()` constructs the default settings object. There are no
 command-line configuration flags.
 
-Invalid values often fall back silently. This page records that behavior; it
-does not endorse or change it.
+Invalid values for several scalar settings still fall back silently.
+`TOKIO_WORKER_THREADS` and `VISION_DATA_DIR` now have explicit startup
+validation as documented below.
 
 ## Variables
 
 | Variable | Type and example | Default | Invalid-value behavior | Consumed |
 | --- | --- | --- | --- | --- |
-| `VISION_DATA_DIR` | Path, e.g. `C:\vision-data` | `./data` | Any string is accepted; later filesystem/database operations may fail | Yes |
+| `VISION_DATA_DIR` | Path, e.g. `C:\vision-data` | `./data` | Empty, whitespace-only, padded, inaccessible, unwritable, file-valued, or unusable database locations fail before storage opens | Yes |
 | `VISION_HTTP_PORT` | `u16`, e.g. `7070` | `7070` | Non-numeric or out-of-range values silently use the default | Yes |
 | `VISION_P2P_PORT` | `u16`, e.g. `7072` | `7072` | Non-numeric or out-of-range values silently use the default | Yes |
 | `VISION_P2P_ADVERTISED_HOST` | Host/IP, e.g. `node.example.org` | unset | Whitespace is trimmed; an empty value becomes unset; syntax is validated later where applicable | Yes |
@@ -23,10 +24,11 @@ does not endorse or change it.
 | `VISION_ALPHA_AIRDROP_ENABLED` | `1`, `true`, or another string | `false` | Only case-insensitive `true` or `1` means true; every present other value means false | Yes |
 | `VISION_SEED_PEERS` | Comma, semicolon, or newline-delimited addresses | Compiled `DEFAULT_SEED_PEERS` | Entries are trimmed; empty entries are removed; an explicitly empty string produces an empty list | Yes |
 
-The approved data-directory policy and the boundary between characterized
-current behavior and future validation are defined in
-[VISION_DATA_DIR_POLICY.md](VISION_DATA_DIR_POLICY.md). Tranche 4A does not
-change runtime behavior.
+The implemented data-directory policy is defined in
+[VISION_DATA_DIR_POLICY.md](VISION_DATA_DIR_POLICY.md). Missing input retains
+`./data`. Relative paths remain accepted and are resolved against the process
+working directory. The effective location is reported before `chain.db` opens.
+An explicitly invalid value never falls back to another directory.
 
 `RUST_LOG` is consumed by `tracing-subscriber`, not by `Settings`. It accepts a
 standard tracing filter such as `vision_core=debug`; when missing or invalid,
@@ -75,9 +77,9 @@ file if `VISION_CONFIG` is set. No such loading is implemented in v1.0.4, and
 
 ## Planned strict-validation migration
 
-A future configuration-hardening tranche may reject values that currently fall
-back silently. That would be an intentional runtime-behavior change and must
-include migration notes.
+Future configuration-hardening tranches may reject additional scalar values
+that currently fall back silently. Each is an intentional runtime-behavior
+change and must include migration notes.
 
 Expected future work includes:
 
@@ -90,3 +92,16 @@ Expected future work includes:
 
 Operators relying on silent fallback should normalize their environment before
 that migration.
+
+## Data-directory migration guidance
+
+Operators should leave `VISION_DATA_DIR` unset to retain `./data`, or set it to
+a non-empty path without surrounding whitespace. Relative paths resolve from
+the process working directory. The selected directory must already exist or
+have an existing writable parent, and `<effective-data-directory>/chain.db`
+must be absent or a directory.
+
+Startup now fails before database initialization when the explicit value or
+effective location is unusable. Correct the environment or filesystem
+permissions and restart. Do not move, delete, replace, or recreate an existing
+`chain.db` as part of configuration correction.
