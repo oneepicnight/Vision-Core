@@ -51,7 +51,7 @@ async fn async_main() -> Result<()> {
         )
         .init();
 
-    let settings = Settings::from_env();
+    let settings = Settings::from_env()?;
 
     print_banner(&settings);
 

@@ -1,3 +1,6 @@
+use std::fmt;
+use std::net::{IpAddr, SocketAddr};
+
 use crate::config::constants::*;
 
 trait SettingsSource {
@@ -83,25 +86,76 @@ pub struct Settings {
     pub seed_peers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsError {
+    InvalidBoolean { name: &'static str, value: String },
+    InvalidAdvertisedHost { value: String },
+    InvalidAdvertisedPort { value: String },
+    AdvertisedHostWithoutPort { value: String },
+    AdvertisedPortWithoutHost { value: String },
+    InvalidSeedPeersValue { value: String },
+    InvalidSeedPeerEntry { value: String },
+}
+
+impl fmt::Display for SettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBoolean { name, value } => {
+                write!(formatter, "invalid {name} value {value:?}: expected true or false")
+            }
+            Self::InvalidAdvertisedHost { value } => write!(
+                formatter,
+                "invalid VISION_P2P_ADVERTISED_HOST value {value:?}: expected a hostname or IP address"
+            ),
+            Self::InvalidAdvertisedPort { value } => write!(
+                formatter,
+                "invalid VISION_P2P_ADVERTISED_PORT value {value:?}: expected a nonzero port"
+            ),
+            Self::AdvertisedHostWithoutPort { value } => write!(
+                formatter,
+                "invalid VISION_P2P_ADVERTISED_HOST value {value:?}: VISION_P2P_ADVERTISED_PORT is also required"
+            ),
+            Self::AdvertisedPortWithoutHost { value } => write!(
+                formatter,
+                "invalid VISION_P2P_ADVERTISED_PORT value {value:?}: VISION_P2P_ADVERTISED_HOST is also required"
+            ),
+            Self::InvalidSeedPeersValue { value } => write!(
+                formatter,
+                "invalid VISION_SEED_PEERS value {value:?}: expected an empty string to disable defaults or one or more socket addresses"
+            ),
+            Self::InvalidSeedPeerEntry { value } => write!(
+                formatter,
+                "invalid VISION_SEED_PEERS entry {value:?}: expected a socket address"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {}
+
 impl Default for Settings {
     fn default() -> Self {
         Self::from_source(&EnvironmentSettingsSource)
+            .expect("default environment should produce valid settings")
     }
 }
 
 impl Settings {
     /// Load settings from the environment. Extend here to also read a TOML
     /// config file if `VISION_CONFIG` is set.
-    pub fn from_env() -> Self {
-        Self::default()
+    pub fn from_env() -> Result<Self, SettingsError> {
+        Self::from_source(&EnvironmentSettingsSource)
     }
 
-    fn from_source(source: &impl SettingsSource) -> Self {
+    fn from_source(source: &impl SettingsSource) -> Result<Self, SettingsError> {
         Self::from_raw(RawSettings::from_source(source))
     }
 
-    fn from_raw(raw: RawSettings) -> Self {
-        Self {
+    fn from_raw(raw: RawSettings) -> Result<Self, SettingsError> {
+        let (p2p_advertised_host, p2p_advertised_port) =
+            parse_p2p_advertised_identity(raw.p2p_advertised_host, raw.p2p_advertised_port)?;
+
+        Ok(Self {
             data_dir: raw.data_dir.unwrap_or_else(|| "./data".into()),
             http_addr: format!(
                 "0.0.0.0:{}",
@@ -115,15 +169,13 @@ impl Settings {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(DEFAULT_P2P_PORT)
             ),
-            p2p_advertised_host: parse_optional_string(raw.p2p_advertised_host),
-            p2p_advertised_port: raw
-                .p2p_advertised_port
-                .and_then(|p| p.parse::<u16>().ok())
-                .filter(|port| *port != 0),
-            allow_private_peer_addresses: raw
-                .allow_private_peer_addresses
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(true),
+            p2p_advertised_host,
+            p2p_advertised_port,
+            allow_private_peer_addresses: parse_explicit_bool(
+                "VISION_ALLOW_PRIVATE_PEERS",
+                raw.allow_private_peer_addresses,
+                true,
+            )?,
             miner_address: parse_miner_address(raw.miner_address),
             mining_enabled: raw
                 .mining_enabled
@@ -134,24 +186,101 @@ impl Settings {
                 .alpha_airdrop_enabled
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
-            seed_peers: parse_seed_peers(raw.seed_peers),
-        }
+            seed_peers: parse_seed_peers(raw.seed_peers)?,
+        })
     }
 }
 
-fn parse_optional_string(raw: Option<String>) -> Option<String> {
-    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+fn parse_explicit_bool(
+    name: &'static str,
+    raw: Option<String>,
+    default: bool,
+) -> Result<bool, SettingsError> {
+    let Some(value) = raw else {
+        return Ok(default);
+    };
+
+    if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(SettingsError::InvalidBoolean { name, value })
+    }
 }
 
-fn parse_seed_peers(raw: Option<String>) -> Vec<String> {
+fn parse_advertised_host(value: String) -> Result<String, SettingsError> {
+    let host = value.trim();
+    if host.is_empty() {
+        return Err(SettingsError::InvalidAdvertisedHost { value });
+    }
+
+    if host.contains(':') && host.parse::<IpAddr>().is_err() {
+        return Err(SettingsError::InvalidAdvertisedHost { value });
+    }
+
+    if host.parse::<IpAddr>().is_ok()
+        || host
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-'))
+    {
+        Ok(host.to_string())
+    } else {
+        Err(SettingsError::InvalidAdvertisedHost { value })
+    }
+}
+
+fn parse_advertised_port(value: String) -> Result<u16, SettingsError> {
+    match value.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err(SettingsError::InvalidAdvertisedPort { value }),
+    }
+}
+
+fn parse_p2p_advertised_identity(
+    host_raw: Option<String>,
+    port_raw: Option<String>,
+) -> Result<(Option<String>, Option<u16>), SettingsError> {
+    let host = host_raw.clone().map(parse_advertised_host).transpose()?;
+    let port = port_raw.clone().map(parse_advertised_port).transpose()?;
+
+    match (host, port) {
+        (None, None) => Ok((None, None)),
+        (Some(host), Some(port)) => Ok((Some(host), Some(port))),
+        (Some(_), None) => Err(SettingsError::AdvertisedHostWithoutPort {
+            value: host_raw.expect("original advertised host should be present"),
+        }),
+        (None, Some(_)) => Err(SettingsError::AdvertisedPortWithoutHost {
+            value: port_raw.expect("original advertised port should be present"),
+        }),
+    }
+}
+
+fn parse_seed_peers(raw: Option<String>) -> Result<Vec<String>, SettingsError> {
     match raw {
-        Some(raw) => raw
-            .split([',', ';', '\n'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect(),
-        None => DEFAULT_SEED_PEERS.iter().map(|s| s.to_string()).collect(),
+        Some(raw) if raw.is_empty() => Ok(vec![]),
+        Some(raw) => {
+            let peers: Vec<String> = raw
+                .split([',', ';', '\n'])
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    entry
+                        .parse::<SocketAddr>()
+                        .map(|_| entry.to_string())
+                        .map_err(|_| SettingsError::InvalidSeedPeerEntry {
+                            value: entry.to_string(),
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+
+            if peers.is_empty() {
+                Err(SettingsError::InvalidSeedPeersValue { value: raw })
+            } else {
+                Ok(peers)
+            }
+        }
+        None => Ok(DEFAULT_SEED_PEERS.iter().map(|s| s.to_string()).collect()),
     }
 }
 
@@ -180,7 +309,8 @@ mod tests {
     use std::process::{Command, Output};
 
     use super::{
-        parse_miner_address, parse_optional_string, parse_seed_peers, Settings, SettingsSource,
+        parse_explicit_bool, parse_miner_address, parse_seed_peers, Settings, SettingsError,
+        SettingsSource,
     };
     use crate::config::constants::{DEFAULT_HTTP_PORT, DEFAULT_P2P_PORT, DEFAULT_SEED_PEERS};
 
@@ -226,6 +356,7 @@ mod tests {
         command
             .arg("--exact")
             .arg("config::settings::tests::settings_subprocess_probe")
+            .arg("--nocapture")
             .arg("--test-threads=1")
             .env(SETTINGS_PROBE_SCENARIO, scenario);
 
@@ -249,15 +380,33 @@ mod tests {
         );
     }
 
+    fn assert_probe_rejected(scenario: &str, environment: &[(&str, &str)], expected: &str) {
+        let output = run_settings_probe(scenario, environment);
+        assert!(
+            !output.status.success(),
+            "settings probe {scenario:?} unexpectedly succeeded"
+        );
+        let output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output_text.contains(expected),
+            "settings probe {scenario:?} did not report the expected failure\noutput:\n{output_text}"
+        );
+    }
+
     #[test]
     fn parse_seed_peers_uses_defaults_when_unset() {
-        let peers = parse_seed_peers(None);
+        let peers = parse_seed_peers(None).expect("unset seed peers should use defaults");
         assert!(!peers.is_empty());
     }
 
     #[test]
     fn parse_seed_peers_allows_empty_override() {
-        let peers = parse_seed_peers(Some(String::new()));
+        let peers = parse_seed_peers(Some(String::new()))
+            .expect("explicitly empty seed peers should disable defaults");
         assert!(peers.is_empty());
     }
 
@@ -265,7 +414,8 @@ mod tests {
     fn parse_seed_peers_splits_and_trims() {
         let peers = parse_seed_peers(Some(
             " 127.0.0.1:7072 , 10.0.0.1:8080;\n192.168.1.1:9000 ".to_string(),
-        ));
+        ))
+        .expect("valid seed-peer list should parse");
         assert_eq!(
             peers,
             vec![
@@ -277,13 +427,48 @@ mod tests {
     }
 
     #[test]
-    fn parse_optional_string_trims_and_rejects_empty_values() {
+    fn parse_seed_peers_rejects_non_empty_values_without_usable_entries() {
+        let error = parse_seed_peers(Some(" \t ; , \n".to_string()))
+            .expect_err("whitespace-only seed peers should fail");
         assert_eq!(
-            parse_optional_string(Some("  peer.example  ".to_string())),
-            Some("peer.example".to_string())
+            error.to_string(),
+            "invalid VISION_SEED_PEERS value \" \\t ; , \\n\": expected an empty string to disable defaults or one or more socket addresses"
         );
-        assert_eq!(parse_optional_string(Some(" \t ".to_string())), None);
-        assert_eq!(parse_optional_string(None), None);
+    }
+
+    #[test]
+    fn parse_seed_peers_rejects_invalid_socket_addresses() {
+        let error = parse_seed_peers(Some("127.0.0.1:7072, seed.example:7072".to_string()))
+            .expect_err("invalid seed-peer entries should fail");
+        assert_eq!(
+            error,
+            SettingsError::InvalidSeedPeerEntry {
+                value: "seed.example:7072".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_boolean_parser_accepts_true_and_false_only() {
+        assert!(parse_explicit_bool(
+            "VISION_ALLOW_PRIVATE_PEERS",
+            Some("TrUe".to_string()),
+            false
+        )
+        .unwrap());
+        assert!(!parse_explicit_bool(
+            "VISION_ALLOW_PRIVATE_PEERS",
+            Some("FALSE".to_string()),
+            true
+        )
+        .unwrap());
+        assert!(parse_explicit_bool("VISION_ALLOW_PRIVATE_PEERS", None, true).unwrap());
+        assert_eq!(
+            parse_explicit_bool("VISION_ALLOW_PRIVATE_PEERS", Some("1".to_string()), true)
+                .unwrap_err()
+                .to_string(),
+            "invalid VISION_ALLOW_PRIVATE_PEERS value \"1\": expected true or false"
+        );
     }
 
     #[test]
@@ -297,7 +482,8 @@ mod tests {
 
     #[test]
     fn typed_settings_seam_preserves_defaults() {
-        let settings = Settings::from_source(&TestSettingsSource::default());
+        let settings = Settings::from_source(&TestSettingsSource::default())
+            .expect("default settings should remain valid");
 
         assert_eq!(settings.data_dir, "./data");
         assert_eq!(settings.http_addr, format!("0.0.0.0:{DEFAULT_HTTP_PORT}"));
@@ -331,20 +517,21 @@ mod tests {
             let settings = Settings::from_source(&TestSettingsSource::with_values(&[(
                 "VISION_DATA_DIR",
                 raw,
-            )]));
+            )]))
+            .expect("non-P2P data directory behavior should be preserved");
             assert_eq!(settings.data_dir, expected);
         }
     }
 
     #[test]
-    fn typed_settings_seam_preserves_valid_and_invalid_parsing() {
+    fn typed_settings_seam_preserves_non_p2p_fallbacks_while_accepting_valid_p2p_values() {
         let settings = Settings::from_source(&TestSettingsSource::with_values(&[
             ("VISION_DATA_DIR", ""),
             ("VISION_HTTP_PORT", "17070"),
             ("VISION_P2P_PORT", "not-a-port"),
             ("VISION_P2P_ADVERTISED_HOST", " peer.example "),
-            ("VISION_P2P_ADVERTISED_PORT", "0"),
-            ("VISION_ALLOW_PRIVATE_PEERS", "yes"),
+            ("VISION_P2P_ADVERTISED_PORT", "17073"),
+            ("VISION_ALLOW_PRIVATE_PEERS", "false"),
             (
                 "VISION_MINER_ADDRESS",
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -353,7 +540,8 @@ mod tests {
             ("VISION_MINING_THREADS", "many"),
             ("VISION_ALPHA_AIRDROP_ENABLED", "1"),
             ("VISION_SEED_PEERS", "127.0.0.1:17072; 127.0.0.1:17073"),
-        ]));
+        ]))
+        .expect("valid P2P inputs should still load");
 
         assert_eq!(settings.data_dir, "");
         assert_eq!(settings.http_addr, "0.0.0.0:17070");
@@ -362,7 +550,7 @@ mod tests {
             settings.p2p_advertised_host,
             Some("peer.example".to_string())
         );
-        assert_eq!(settings.p2p_advertised_port, None);
+        assert_eq!(settings.p2p_advertised_port, Some(17073));
         assert!(!settings.allow_private_peer_addresses);
         assert_eq!(
             settings.miner_address,
@@ -375,6 +563,38 @@ mod tests {
             settings.seed_peers,
             vec!["127.0.0.1:17072".to_string(), "127.0.0.1:17073".to_string()]
         );
+    }
+
+    #[test]
+    fn typed_settings_seam_rejects_invalid_p2p_values() {
+        let cases = [
+            (
+                &[("VISION_ALLOW_PRIVATE_PEERS", "yes")][..],
+                "invalid VISION_ALLOW_PRIVATE_PEERS value \"yes\": expected true or false",
+            ),
+            (
+                &[("VISION_P2P_ADVERTISED_HOST", "peer.example")][..],
+                "invalid VISION_P2P_ADVERTISED_HOST value \"peer.example\": VISION_P2P_ADVERTISED_PORT is also required",
+            ),
+            (
+                &[("VISION_P2P_ADVERTISED_PORT", "17073")][..],
+                "invalid VISION_P2P_ADVERTISED_PORT value \"17073\": VISION_P2P_ADVERTISED_HOST is also required",
+            ),
+            (
+                &[("VISION_P2P_ADVERTISED_HOST", "peer.example"), ("VISION_P2P_ADVERTISED_PORT", "0")][..],
+                "invalid VISION_P2P_ADVERTISED_PORT value \"0\": expected a nonzero port",
+            ),
+            (
+                &[("VISION_SEED_PEERS", "seed.example:7072")][..],
+                "invalid VISION_SEED_PEERS entry \"seed.example:7072\": expected a socket address",
+            ),
+        ];
+
+        for (values, expected) in cases {
+            let error = Settings::from_source(&TestSettingsSource::with_values(values))
+                .expect_err("invalid P2P settings should fail");
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]
@@ -392,7 +612,7 @@ mod tests {
                 ("VISION_P2P_PORT", "17072"),
                 ("VISION_P2P_ADVERTISED_HOST", " peer.example "),
                 ("VISION_P2P_ADVERTISED_PORT", "17073"),
-                ("VISION_ALLOW_PRIVATE_PEERS", "TrUe"),
+                ("VISION_ALLOW_PRIVATE_PEERS", "false"),
                 (
                     "VISION_MINER_ADDRESS",
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -406,22 +626,34 @@ mod tests {
     }
 
     #[test]
-    fn settings_invalid_values_use_current_fallbacks_in_isolation() {
-        assert_probe_succeeds(
-            "invalid",
-            &[
-                ("VISION_DATA_DIR", ""),
-                ("VISION_HTTP_PORT", "not-a-port"),
-                ("VISION_P2P_PORT", "70000"),
-                ("VISION_P2P_ADVERTISED_HOST", " \t "),
-                ("VISION_P2P_ADVERTISED_PORT", "0"),
-                ("VISION_ALLOW_PRIVATE_PEERS", "yes"),
-                ("VISION_MINER_ADDRESS", "ABC"),
-                ("VISION_MINING", "enabled"),
-                ("VISION_MINING_THREADS", "many"),
-                ("VISION_ALPHA_AIRDROP_ENABLED", "yes"),
-                ("VISION_SEED_PEERS", ""),
-            ],
+    fn settings_explicit_empty_seed_peer_override_is_allowed_in_isolation() {
+        assert_probe_succeeds("empty_seed_override", &[("VISION_SEED_PEERS", "")]);
+    }
+
+    #[test]
+    fn settings_reject_invalid_private_peer_policy_in_isolation() {
+        assert_probe_rejected(
+            "invalid_private_peer_policy",
+            &[("VISION_ALLOW_PRIVATE_PEERS", "yes")],
+            "invalid VISION_ALLOW_PRIVATE_PEERS value \"yes\": expected true or false",
+        );
+    }
+
+    #[test]
+    fn settings_reject_partial_advertised_identity_in_isolation() {
+        assert_probe_rejected(
+            "partial_advertised_identity",
+            &[("VISION_P2P_ADVERTISED_HOST", "peer.example")],
+            "invalid VISION_P2P_ADVERTISED_HOST value \"peer.example\": VISION_P2P_ADVERTISED_PORT is also required",
+        );
+    }
+
+    #[test]
+    fn settings_reject_invalid_seed_peer_in_isolation() {
+        assert_probe_rejected(
+            "invalid_seed_peer",
+            &[("VISION_SEED_PEERS", "seed.example:7072")],
+            "invalid VISION_SEED_PEERS entry \"seed.example:7072\": expected a socket address",
         );
     }
 
@@ -431,7 +663,13 @@ mod tests {
             return;
         };
 
-        let settings = Settings::from_env();
+        let settings = match Settings::from_env() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
         match scenario.as_str() {
             "defaults" => {
                 assert_eq!(settings.data_dir, "./data");
@@ -461,7 +699,7 @@ mod tests {
                     Some("peer.example".to_string())
                 );
                 assert_eq!(settings.p2p_advertised_port, Some(17073));
-                assert!(settings.allow_private_peer_addresses);
+                assert!(!settings.allow_private_peer_addresses);
                 assert_eq!(
                     settings.miner_address,
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -474,17 +712,7 @@ mod tests {
                     vec!["127.0.0.1:17072".to_string(), "127.0.0.1:17073".to_string()]
                 );
             }
-            "invalid" => {
-                assert_eq!(settings.data_dir, "");
-                assert_eq!(settings.http_addr, format!("0.0.0.0:{DEFAULT_HTTP_PORT}"));
-                assert_eq!(settings.p2p_addr, format!("0.0.0.0:{DEFAULT_P2P_PORT}"));
-                assert_eq!(settings.p2p_advertised_host, None);
-                assert_eq!(settings.p2p_advertised_port, None);
-                assert!(!settings.allow_private_peer_addresses);
-                assert_eq!(settings.miner_address, "0".repeat(64));
-                assert!(!settings.mining_enabled);
-                assert_eq!(settings.mining_threads, 0);
-                assert!(!settings.alpha_airdrop_enabled);
+            "empty_seed_override" => {
                 assert!(settings.seed_peers.is_empty());
             }
             unexpected => panic!("unexpected settings probe scenario: {unexpected}"),
