@@ -16,6 +16,7 @@ base. It does not define policy. Follow the linked controlling documents.
 | You need the reason behind an accepted design | [Engineering Decision Records](DECISIONS/README.md) |
 | You need the current maturity assessment | [Current-State Assessment](VISION_CORE_CURRENT_STATE_ASSESSMENT.md) |
 | You are designing health or readiness | [Readiness and Health Model Design](READINESS_HEALTH_MODEL_DESIGN.md) |
+| You are tracing current startup readiness boundaries | [Readiness Lifecycle Characterization](READINESS_LIFECYCLE_CHARACTERIZATION.md) |
 
 ## New Contributor Path
 
@@ -204,6 +205,7 @@ record.
 | Current HTTP routes | [HTTP API](API.md) |
 | Current environment settings | [Configuration](CONFIGURATION.md) |
 | Future readiness and health design | [Readiness and Health Model Design](READINESS_HEALTH_MODEL_DESIGN.md) |
+| Current startup lifecycle characterization | [Readiness Lifecycle Characterization](READINESS_LIFECYCLE_CHARACTERIZATION.md) |
 | Protected protocol areas | [Consensus Boundaries](CONSENSUS_BOUNDARIES.md) |
 | Validation matrix and evidence | [Testing Policy](TESTING_POLICY.md) |
 | Complete release lifecycle | [Release Process](RELEASE_PROCESS.md) |

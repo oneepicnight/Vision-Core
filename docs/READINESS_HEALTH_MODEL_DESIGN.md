@@ -378,6 +378,9 @@ tranches, not permission to implement them.
 
 No tranche below is authorized by this document.
 
+The current startup boundary evidence is recorded in
+[Readiness Lifecycle Characterization](READINESS_LIFECYCLE_CHARACTERIZATION.md).
+
 ### A. Internal lifecycle and status model
 
 Define private typed state and transition tests. Do not add routes or change
