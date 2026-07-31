@@ -376,10 +376,25 @@ where
 // --- Inbound message dispatch -----------------------------------------------
 
 fn derive_local_node_nonce(listen_addr: SocketAddr) -> u64 {
+    static NEXT_NONCE_INPUT: AtomicU64 = AtomicU64::new(1);
+
     let mut input = Vec::new();
     input.extend_from_slice(listen_addr.to_string().as_bytes());
     input.extend_from_slice(crate::genesis::genesis::GENESIS_HASH.as_bytes());
     input.extend_from_slice(crate::config::constants::NETWORK_ID.as_bytes());
+    input.extend_from_slice(&std::process::id().to_be_bytes());
+    input.extend_from_slice(
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_be_bytes(),
+    );
+    input.extend_from_slice(
+        &NEXT_NONCE_INPUT
+            .fetch_add(1, Ordering::Relaxed)
+            .to_be_bytes(),
+    );
     let hash = blake3::hash(&input);
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&hash.as_bytes()[..8]);
@@ -1062,6 +1077,15 @@ mod tests {
             manager.local_handshake(0).seed_peers,
             vec!["127.0.0.1:19020"]
         );
+    }
+
+    #[test]
+    fn managers_on_the_same_bind_address_receive_distinct_node_nonces() {
+        let addr = "0.0.0.0:7072".parse().unwrap();
+        let first = P2PConnectionManager::new(addr, temp_chain(), temp_peer_manager());
+        let second = P2PConnectionManager::new(addr, temp_chain(), temp_peer_manager());
+
+        assert_ne!(first.local_node_nonce(), second.local_node_nonce());
     }
 
     #[tokio::test]
