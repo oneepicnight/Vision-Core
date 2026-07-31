@@ -109,9 +109,10 @@ Follow:
 6. [Roadmap: Configuration Hardening](ROADMAP.md#configuration-hardening)
 7. [Dead-Code Ledger: Configuration and Policy Constants](DEAD_CODE_LEDGER.md#configuration-and-policy-constants)
 
-Configuration Hardening changes observable startup behavior. It begins only
-after the Developer Readiness stack has completed review, CI, and Release
-Promotion.
+Configuration Hardening changes observable startup behavior. The Developer
+Readiness stack, Tranches 1 through 4B, P2P configuration boundary hardening,
+and service startup sequencing are promoted. Read the current status and
+implementation plan before proposing another tranche.
 
 ### Changing the HTTP API
 
@@ -240,8 +241,9 @@ Phase I established the Vision-Core engineering operating system:
 Phase I documentation is complete. Maintain it as living documentation when
 code, policy, owner decisions, or release state changes.
 
-The Developer Readiness stack and Configuration Hardening Tranches 1 through
-4B are promoted. Read [CURRENT_STATUS.md](CURRENT_STATUS.md) for the exact
+The Developer Readiness stack, Configuration Hardening Tranches 1 through 4B,
+P2P configuration boundary hardening, and service startup sequencing are
+promoted. Read [CURRENT_STATUS.md](CURRENT_STATUS.md) for the exact
 authoritative commit, validation baseline, completed work, and current
 authorization boundary.
 

@@ -3,8 +3,9 @@
 ## Purpose and Scope
 
 This document inventories every configuration source found during the
-Vision-Core Phase II Entry Audit. It records current behavior only. It does not
-authorize or implement Configuration Hardening.
+Vision-Core Phase II Entry Audit. It is maintained to record current promoted
+behavior as Configuration Hardening advances. It does not authorize or
+implement Configuration Hardening.
 
 The inventory distinguishes:
 
@@ -34,29 +35,30 @@ They are not candidates for operator configuration.
 
 ## Operator Runtime Settings
 
-All fields below are constructed by `Settings::from_env()`, which currently
-returns `Settings` rather than `Result<Settings, SettingsError>`.
+All fields below are constructed by `Settings::from_env()`, which returns
+`Result<Settings, SettingsError>` so invalid configuration can fail before
+storage or service initialization.
 
 | Item | Location and consumer | Purpose and current behavior | Startup impact | Runtime impact | Consensus impact | Validation if modified |
 | --- | --- | --- | --- | --- | --- | --- |
-| `VISION_DATA_DIR` | `src/config/settings.rs`; `node::bootstrap::initialize_chain_state`; `ChainState::open_with_genesis` | Default `./data`. Any present string is accepted. Sled opens `<value>/chain.db`; snapshots are stored in the same database. Empty, malformed, inaccessible, or unintended paths fail later or select different durable state. | High: selects or creates persistent state before services start. | Determines all durable chain and snapshot state for the process. | Persistence-sensitive but does not redefine consensus rules. Selecting the wrong database can expose incompatible state. | `cargo check`; focused settings/startup tests; storage; restart; reorg; snapshot; state-root; full release suite; CI. |
-| `VISION_HTTP_PORT` | `src/config/settings.rs`; parsed and bound in `src/main.rs` | Default `7070`. Non-numeric or out-of-range input silently becomes the default. Bind host is hard-coded to `0.0.0.0`. | High: HTTP parsing and bind occur after chain initialization and background services start. Bind failure exits the main future after partial startup. | Selects API listener exposure. | None directly; API behavior only. | `cargo check`; focused parser/startup/API bind tests; watchdog and VisionX under the configuration policy; full release suite; CI. |
-| `VISION_P2P_PORT` | `src/config/settings.rs`; `node::services::start_services` | Default `7072`. Non-numeric or out-of-range input silently becomes the default. Bind host is hard-coded to `0.0.0.0`. | High: parsed after chain initialization. The listener bind occurs inside a spawned task; bind failure is logged and the main startup path can continue without an inbound P2P listener. | Selects inbound P2P listener. | Protocol-adjacent operational input; does not change wire rules. | `cargo check`; focused parser/listener/P2P tests; watchdog; relevant multi-node tests; VisionX; full release suite; CI. |
-| `VISION_P2P_ADVERTISED_HOST` | `src/config/settings.rs`; P2P connection and handshake construction | Missing or trimmed-empty becomes `None`. Other syntax is accepted by settings and may be rejected only when peer identity is resolved. | Low at local startup because syntax is not validated centrally. | Affects durable peer identity advertised to peers and whether other nodes accept it. | Network compatibility and reachability sensitive; not block consensus. | Focused parser, handshake, advertised-identity, and private-address tests; watchdog; multi-node; VisionX; full release suite; CI. |
-| `VISION_P2P_ADVERTISED_PORT` | `src/config/settings.rs`; P2P handshake construction | Missing, invalid, out-of-range, or zero becomes `None`. Host and port are parsed independently. | Low; no central host/port pairing validation. | Can produce incomplete advertised identity and affect peer reachability. | Network compatibility sensitive; not block consensus. | Same as advertised host, including host/port pairing cases. |
-| `VISION_ALLOW_PRIVATE_PEERS` | `src/config/settings.rs`; peer advertised-address validation | Missing defaults to `true`. Present `1` or case-insensitive `true` is true; every other present value is false. Invalid text therefore changes behavior instead of falling back to the documented default. | None unless peer services start. | Controls acceptance of loopback, private, and link-local advertised peer identities. | Network policy; can materially affect connectivity and topology, not block validity. | Focused boolean, peer-identity, handshake, watchdog, and multi-node tests; VisionX; full release suite; CI. |
+| `VISION_DATA_DIR` | `src/config/settings.rs`; `node::bootstrap::initialize_chain_state`; `ChainState::open_with_genesis` | Default `./data`. Explicit empty, whitespace-only, padded, inaccessible, unwritable, file-valued, or unusable database locations fail before sled opens; valid relative and absolute paths retain the existing `<value>/chain.db` layout. | High: validates and selects persistent state before services start. | Determines all durable chain and snapshot state for the process. | Persistence-sensitive but does not redefine consensus rules. Selecting the wrong database can expose incompatible state. | `cargo check`; focused settings/startup tests; storage; restart; reorg; snapshot; state-root; full release suite; CI. |
+| `VISION_HTTP_PORT` | `src/config/settings.rs`; parsed and bound in `src/main.rs` | Default `7070`. Non-numeric or out-of-range input silently becomes the default. Bind host is hard-coded to `0.0.0.0`. | High: HTTP parsing and bind occur after chain initialization and service construction. Bind failure aborts startup before successful-startup reporting. | Selects API listener exposure. | None directly; API behavior only. | `cargo check`; focused parser/startup/API bind tests; watchdog and VisionX under the configuration policy; full release suite; CI. |
+| `VISION_P2P_PORT` | `src/config/settings.rs`; `node::services::start_services` | Default `7072`. Non-numeric or out-of-range input silently becomes the default. Bind host is hard-coded to `0.0.0.0`. | High: parsed after chain initialization. The listener binds before its task is detached; bind failure aborts startup. | Selects inbound P2P listener. | Protocol-adjacent operational input; does not change wire rules. | `cargo check`; focused parser/listener/P2P tests; watchdog; relevant multi-node tests; VisionX; full release suite; CI. |
+| `VISION_P2P_ADVERTISED_HOST` | `src/config/settings.rs`; P2P connection and handshake construction | Missing is accepted only with a missing advertised port. Empty or malformed values and host-only configuration fail during configuration loading. | High for explicitly configured public identity because validation occurs before services start. | Affects durable peer identity advertised to peers and whether other nodes accept it. | Network compatibility and reachability sensitive; not block consensus. | Focused parser, handshake, advertised-identity, and private-address tests; watchdog; multi-node; VisionX; full release suite; CI. |
+| `VISION_P2P_ADVERTISED_PORT` | `src/config/settings.rs`; P2P handshake construction | Missing is accepted only with a missing advertised host. Invalid, out-of-range, zero, or port-only configuration fails during configuration loading. | High for explicitly configured public identity because validation occurs before services start. | Completes advertised identity and affects peer reachability. | Network compatibility sensitive; not block consensus. | Same as advertised host, including host/port pairing cases. |
+| `VISION_ALLOW_PRIVATE_PEERS` | `src/config/settings.rs`; peer advertised-address validation | Missing preserves the established `true` default. Present values must be ASCII case-insensitive `true` or `false`; all others fail configuration loading. | Invalid explicit policy prevents startup before peer services launch. | Controls acceptance of loopback, private, and link-local advertised peer identities. | Network policy; can materially affect connectivity and topology, not block validity. | Focused boolean, peer-identity, handshake, watchdog, and multi-node tests; VisionX; full release suite; CI. |
 | `VISION_MINER_ADDRESS` | `src/config/settings.rs`; miner candidate and coinbase construction | Missing or invalid input becomes 64 zeroes. Valid input must be exactly 64 lowercase hexadecimal characters. | No failure today. | When mining is enabled, selects the coinbase recipient and therefore candidate state and state root. | Consensus-adjacent input to locally produced valid blocks; validation rules are unchanged. | Focused parser and mining tests; state-root tests; VisionX; watchdog; full release suite; CI. |
 | `VISION_MINING` | `src/config/settings.rs`; `src/main.rs`; `node::services` | Missing defaults to false. Present `1` or case-insensitive `true` enables mining; every other present value disables it. | Controls whether miner services and API state are constructed. | Enables ongoing candidate construction and proof search, gated by peers and recovery state. | Does not change validity rules; changes local block production. | Focused boolean/startup/mining tests; watchdog; VisionX; full release suite; CI. |
 | `VISION_MINING_THREADS` | `src/config/settings.rs`; no runtime consumer | Missing or parse failure becomes `0`, documented as logical CPU count. The field is never consumed. | None. | None. | None today. A future mining-worker implementation would be proof-of-work operational behavior, not proof validity. | Owner decision first; focused parser/miner tests; watchdog; VisionX; full release suite; CI if implemented or removed. |
 | `VISION_ALPHA_AIRDROP_ENABLED` | `src/config/settings.rs`; `NodeApiState`; API router | Missing defaults to false. Present `1` or case-insensitive `true` enables the development-only route; every other present value disables it. | Controls route registration. | Exposes or removes a local state-mutating development endpoint. | Not a consensus-rule change, but accepted mutations still affect local state through application behavior. | Focused boolean, router, enabled/disabled endpoint, and startup tests; watchdog and VisionX under the configuration policy; full release suite; CI. |
-| `VISION_SEED_PEERS` | `src/config/settings.rs`; bootstrap and seed connection loops | Missing uses six compiled defaults. Present input splits on comma, semicolon, or newline; entries are trimmed and empty entries removed. Explicitly empty input disables configured seed connections. Address syntax is validated later in each connection task; invalid entries log and terminate that task. | Does not block startup when an entry is invalid. | Determines initial outbound connectivity and discovery opportunities. | Networking policy only; advertised chain data remains untrusted. | Focused parser and address tests; seed-loop/P2P tests; watchdog; multi-node; VisionX; full release suite; CI. |
+| `VISION_SEED_PEERS` | `src/config/settings.rs`; bootstrap and seed connection loops | Missing uses six compiled defaults. An exactly empty value disables configured seeds. Non-empty input splits on comma, semicolon, or newline; every retained entry must be a socket address. Whitespace-only, delimiter-only, or malformed non-empty input fails configuration loading. | Invalid entries block startup before connection tasks launch; reachability failures do not. | Determines initial outbound connectivity and discovery opportunities. | Networking policy only; advertised chain data remains untrusted. | Focused parser and address tests; seed-loop/P2P tests; watchdog; multi-node; VisionX; full release suite; CI. |
 
 ## Environment Variables Outside `Settings`
 
 | Item | Location | Purpose and current behavior | Startup/runtime impact | Consensus impact | Validation if modified |
 | --- | --- | --- | --- | --- | --- |
 | `RUST_LOG` | `src/main.rs`; `tracing_subscriber::EnvFilter::try_from_default_env` | Standard tracing filter. Missing or invalid input silently uses `info`. | Applied before settings and chain startup. Changes diagnostic volume and possibly timing under heavy logging. | No intended consensus effect. | Focused startup/log-filter tests where feasible; `cargo check`; full release suite for behavior changes; CI. |
-| `TOKIO_WORKER_THREADS` | `src/node/runtime.rs` | Parsed as `usize`; missing or parse failure uses logical CPU count, falling back to 4. Zero reaches `Builder::worker_threads(0)` and can panic before `async_main`. | Critical pre-settings startup input. | No intended consensus effect; concurrency can expose nondeterminism. | Focused runtime-builder subprocess tests for missing, invalid, zero, and valid input; watchdog; VisionX; full release suite; CI. |
+| `TOKIO_WORKER_THREADS` | `src/node/runtime.rs` | Missing uses logical CPU count with a platform fallback of 4. A present value must be a positive, unpadded `usize`; zero, malformed, negative, padded, or overflowing input returns a structured startup error before runtime construction. | Critical pre-settings startup input. | No intended consensus effect; concurrency can expose nondeterminism. | Focused runtime-builder subprocess tests for missing, invalid, zero, and valid input; watchdog; VisionX; full release suite; CI. |
 | `VISION_BINARY_SHA256` | `src/chain/accept.rs` | Included in proof-of-work failure diagnostics; missing becomes `unknown`. | None until a PoW rejection diagnostic is constructed. | Diagnostic only; must not influence acceptance. | Focused PoW diagnostic test proving acceptance result is unchanged; VisionX; full release suite if logic changes. |
 | `VISION_GIT_COMMIT` | `src/chain/accept.rs` | Preferred runtime commit string in PoW failure diagnostics; missing falls back to `GIT_COMMIT`, then `unknown`. | Diagnostic only. | None intended. | Focused diagnostic precedence test; VisionX if code path changes. |
 | `GIT_COMMIT` | `src/chain/accept.rs` | Secondary alias for diagnostic commit identity. | Diagnostic only. | None intended. | Same as `VISION_GIT_COMMIT`. |
@@ -156,8 +158,8 @@ parsing:
 
 This isolates tests from the process environment but duplicates every
 `Settings` field. Adding or changing a field requires updating all literals.
-Most parser behavior is not covered: only seed-peer parsing currently has
-direct unit tests.
+The settings module now also has source-neutral parser tests and subprocess
+startup probes for hardened configuration boundaries.
 
 ## Dependency and Quality Classification
 
@@ -184,16 +186,14 @@ direct unit tests.
 
 ### Inconsistent
 
-- Invalid ports silently use defaults; invalid booleans become false; invalid
-  advertised ports become absent; invalid miner addresses become the zero
-  address; invalid seed peers are rejected asynchronously.
-- `VISION_ALLOW_PRIVATE_PEERS` defaults to true when absent but becomes false
-  for any unrecognized present value.
-- Advertised host and port are independent, so incomplete identity is accepted
-  by settings construction.
+- Invalid ports still silently use defaults; mining and alpha booleans still
+  become false for unrecognized input; invalid miner addresses still become
+  the zero address. P2P identity, private-peer policy, and seed syntax now fail
+  during configuration loading.
 - `TOKIO_WORKER_THREADS` is active while `VISION_MINING_THREADS` is unused;
   their names can be mistaken as controlling the same concurrency.
-- HTTP bind validation occurs after P2P and mining services have started.
+- HTTP bind still occurs after service construction, but failure now prevents
+  successful-startup reporting and terminates startup.
 
 ### Unreachable or unused
 
@@ -205,15 +205,17 @@ direct unit tests.
 
 ### Difficult to validate
 
-- `Settings::default()` reads global process environment directly.
-- Most setting parsers are embedded in `Default` and lack unit tests.
-- Environment mutation in parallel Rust tests would be process-global and
-  nondeterministic without subprocess isolation or a source-neutral parser.
+- `Settings::default()` still reads global process environment directly for
+  default construction, while `Settings::from_env()` exposes structured
+  configuration failure to startup.
+- Settings acquisition is separated from typed parsing and covered by
+  source-neutral and subprocess characterization tests.
 - Runtime construction happens before `Settings`, so runtime-thread validation
   has a separate failure boundary.
 - Startup side effects are not staged: HTTP bind failure can occur after P2P
   and mining tasks are launched.
-- Seed-peer syntax errors occur asynchronously rather than during startup.
+- Seed-peer reachability errors remain asynchronous, while syntax errors now
+  fail during configuration loading.
 - Several network timeout literals have distinct semantics but no typed names.
 
 ## Inventory Conclusions
@@ -225,11 +227,10 @@ topology, API exposure, mining behavior, and persistence selection.
 The safest initial work is characterization and a source-neutral parsing seam.
 The following decisions must be made before their dependent phases:
 
-- retain or change the permissive private-peer default;
 - define when a miner address is required;
 - implement or remove `VISION_MINING_THREADS`;
 - implement or remove `VISION_CONFIG`, including precedence;
-- define empty data-directory and empty seed-list policy;
+- preserve the implemented data-directory and empty seed-list policies;
 - decide whether hard-coded bind hosts become operator settings;
 - decide whether ancillary variables such as `RUST_LOG` and
   `TOKIO_WORKER_THREADS` are inside the strict-validation contract.

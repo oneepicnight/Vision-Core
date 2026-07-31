@@ -243,7 +243,12 @@ Configuration work must not:
 - change genesis, chain, or VisionX identity without protocol authorization;
 - conceal behavior changes as parsing cleanup.
 
-The exact disposition of `VISION_CONFIG`, `VISION_MINING_THREADS`, private-peer defaults, and operator migration is governed by the approved Configuration Hardening tranche. Unsupported configuration-file precedence or migration semantics are **Owner Decision Required** until designed.
+The promoted P2P hardening work preserves the established permissive
+private-peer default while rejecting invalid explicit values. The exact
+disposition of `VISION_CONFIG`, `VISION_MINING_THREADS`, mining policy, and
+operator migration remains governed by separately approved Configuration
+Hardening work. Unsupported configuration-file precedence or migration
+semantics are **Owner Decision Required** until designed.
 
 ## Developer Readiness Boundaries
 

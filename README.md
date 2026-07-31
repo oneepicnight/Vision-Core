@@ -49,8 +49,10 @@ cargo run --release --locked
 ```
 
 The node initializes tracing, loads settings, opens or restores chain state,
-starts P2P, synchronization, and optional mining services, then serves the HTTP
-API. See [Architecture](docs/ARCHITECTURE.md) and
+binds required P2P and HTTP listeners, starts synchronization and optional
+mining services, then serves the HTTP API. Required listener bind failures
+abort startup before the node reports that all services started. See
+[Architecture](docs/ARCHITECTURE.md) and
 [Configuration](docs/CONFIGURATION.md).
 
 ## Configuration
@@ -64,16 +66,19 @@ Supported variables include:
 | `VISION_P2P_PORT` | `u16` | `7072` | Yes |
 | `VISION_P2P_ADVERTISED_HOST` | non-empty string | unset | Yes |
 | `VISION_P2P_ADVERTISED_PORT` | nonzero `u16` | unset | Yes |
-| `VISION_ALLOW_PRIVATE_PEERS` | boolean-like string | `true` | Yes |
+| `VISION_ALLOW_PRIVATE_PEERS` | explicit `true` or `false` | `true` | Yes |
 | `VISION_MINER_ADDRESS` | 64 lowercase hex characters | 64 zeroes | Yes |
 | `VISION_MINING` | boolean-like string | `false` | Yes |
 | `VISION_MINING_THREADS` | unsigned integer | `0` | Parsed, currently unused |
 | `VISION_ALPHA_AIRDROP_ENABLED` | boolean-like string | `false` | Yes |
 | `VISION_SEED_PEERS` | delimited address list | compiled defaults | Yes |
 
-Invalid numeric and boolean values currently fall back silently; an invalid
-miner address becomes the zero address. `VISION_CONFIG` is mentioned in source
-documentation but is not presently read. Exact behavior and examples are in
+Some non-P2P numeric and boolean values still fall back silently, and an
+invalid miner address becomes the zero address. P2P private-peer policy,
+advertised identity, and seed-list inputs now fail during configuration loading
+when invalid; an exactly empty seed list intentionally disables configured
+seeds. `VISION_CONFIG` is mentioned in source documentation but is not
+presently read. Exact behavior and examples are in
 [Configuration](docs/CONFIGURATION.md).
 
 ## HTTP API

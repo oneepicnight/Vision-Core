@@ -23,34 +23,41 @@ Historical tags remain immutable. `vision-core-consensus-v1.0.3` and `vision-cor
 
 - Long-lived integration branch: `dev/configuration-hardening-v104`
 - Current promoted code baseline:
-  `b23ca0c53706c095acb0dd48b5ab5593166ac8ab`
-- Promoted code tree: `0bb6f9854972dab20babe5b4bccd67b6a24dbebd`
-- Current `origin/main`: `c9fad4626eabb352b3f54f6a82536f5a3c7f4067`
+  `da72260dcb9cb66971c433e05a6633a4800dfe4d`
+- Promoted code tree: `457efc2647bf56fbfc29381cf3796410b7533775`
+- Current `origin/main`: `da72260dcb9cb66971c433e05a6633a4800dfe4d`
+- Current local and remote integration baseline:
+  `da72260dcb9cb66971c433e05a6633a4800dfe4d`
 
 Configuration Hardening review uses short-lived per-tranche branches. Tranche
 4B was reviewed through pull request #7 and promoted to `main` by normal
 fast-forward. A separate documentation-only closeout commit then advanced
 `main` to `c9fad4626eabb352b3f54f6a82536f5a3c7f4067` without changing source,
-tests, Cargo, dependencies, or CI. The long-lived local and remote
-integration branches are synchronized with that current `main` tip.
+tests, Cargo, dependencies, or CI. The later documentation synchronization
+commit `52e1aae53c6a135718f76ada48d1524d3e33a6f5`, P2P configuration hardening
+commit `9a2099273127d6c8135bada8b8bab47c9190c25e`, and service startup
+sequencing commit `da72260dcb9cb66971c433e05a6633a4800dfe4d` were subsequently promoted
+through independent review and CI cycles. The long-lived local and remote
+integration branches are synchronized with the current `main` tip.
 
 ## Current Validation Baseline
 
-The latest completed Configuration Hardening Tranche 4B evidence records:
+The latest completed service-startup-sequencing evidence at `da72260d` records:
 
-- tests discovered: 535;
-- passed: 534;
-- failed: 0;
-- ignored: 1;
+- full release suite: 544 passed, 0 failed, 1 ignored;
 - focused watchdog: 1 passed, 0 failed;
-- VisionX module: 32 passed, 0 failed;
-- focused data-directory tests: 11 passed, 0 failed;
-- storage tests: 9 passed, 0 failed;
-- bootstrap/restart tests: 14 passed, 0 failed, 1 ignored;
-- reorganization tests: 16 passed, 0 failed;
-- snapshot tests: 17 passed, 0 failed;
-- state-root tests: 10 passed, 0 failed;
-- formatting: clean.
+- VisionX module: 43 passed, 0 failed;
+- focused startup and service-boundary validation: passed;
+- representative multi-node validation: passed;
+- `cargo check --all-targets --locked`: passed;
+- formatting: clean;
+- Clippy: completed under the established non-blocking baseline policy.
+
+The earlier Tranche 4B persistence-sensitive evidence remains relevant to the
+unchanged storage boundary: 11 focused data-directory tests, 9 storage tests,
+14 bootstrap/restart tests with 1 ignored, 16 reorganization tests, 17
+snapshot tests, and 10 state-root tests passed at the Tranche 4B candidate.
+Those historical counts are not presented as a rerun at `da72260d`.
 
 The sole ignored test is `node::bootstrap::tests::bootstrap_recovery_worker`.
 
@@ -136,13 +143,27 @@ Warnings have been classified. The totals are not blanket authorization to delet
   `chain.db` layout;
 - Tranche 4B passed pull-request CI run `30588116415` and post-promotion
   `main` CI run `30590200588` before its short-lived review branch was retired.
+- P2P configuration boundary hardening commit
+  `9a2099273127d6c8135bada8b8bab47c9190c25e` preserves the permissive
+  private-peer default when omitted, accepts only explicit `true` or `false`,
+  distinguishes an explicitly empty seed list from an omitted one, rejects
+  malformed non-empty seed input during configuration loading, and requires
+  advertised host and port to be supplied together;
+- service startup sequencing commit
+  `da72260dcb9cb66971c433e05a6633a4800dfe4d` binds the P2P listener before
+  detaching its task, treats P2P and API bind failures as startup failures, and
+  emits `[NODE] All services started` only after both required listeners bind;
+- seed reachability remains outside startup-readiness policy: dialing may fail
+  after local startup without redefining chain or listener readiness.
 
 ## Remaining Technical Debt
 
-- invalid scalar configuration values can still silently fall back to defaults;
+- invalid HTTP/P2P ports and several non-P2P scalar settings can still silently
+  fall back to defaults or disabled values;
 - `VISION_CONFIG` is documented but not implemented;
 - `VISION_MINING_THREADS` is parsed but not consumed;
-- private-peer policy defaults permissive;
+- private-peer policy still defaults permissive when omitted, now as an
+  explicit preserved policy rather than an invalid-value fallback;
 - HTTP error envelopes and status semantics are inconsistent;
 - `/peers` remains a stub;
 - no OpenAPI or declared API versioning policy exists;
@@ -189,12 +210,13 @@ remains in the linked policy or ledger.
 | OD-11 | Define emergency chain and database incident-recovery authority and procedures. | [ENGINEERING_PLAYBOOK.md](ENGINEERING_PLAYBOOK.md) |
 | OD-12 | Approve the exact scope and compatibility classification of the planned Vision-Core v1.1.0 milestone. | [ROADMAP.md](ROADMAP.md) |
 
-## Current Work: Configuration Hardening
+## Current Work: Targeted Operational Hardening
 
 Configuration Hardening is active on `dev/configuration-hardening-v104`.
-Tranches 1 through 4B are promoted. No later tranche is authorized by this
-status record; the next scope requires a roadmap review and explicit owner
-authorization.
+Tranches 1 through 4B, P2P configuration boundary hardening, and service
+startup sequencing hardening are promoted. Vision-Core has moved from broad
+repository modernization into targeted operational hardening. This status does
+not classify Vision-Core as generally production-ready.
 
 Its intended scope includes:
 
@@ -202,11 +224,14 @@ Its intended scope includes:
 - reconciling the undocumented or unimplemented `VISION_CONFIG` behavior;
 - resolving `VISION_MINING_THREADS`;
 - validating miner identity and addresses at startup;
-- making private-peer policy explicit;
+- retaining the now-explicit private-peer default while improving operator
+  diagnostics;
 - documenting accepted values and operator migration.
 
-Later work may intentionally change runtime startup behavior for other invalid
-settings that still fall back. Each behavior change requires its own
-authorization, isolated commit, applicable focused and full validation,
-short-lived review branch, pull-request CI, promotion gate, and documentation
-closeout.
+No later implementation tranche is authorized by this status record. The next
+scope requires a roadmap review and explicit owner authorization. Later work
+may intentionally change runtime startup behavior for other invalid settings
+that still fall back or may add operational status reporting. Each behavior
+change requires its own authorization, isolated commit, applicable focused and
+full validation, short-lived review branch, pull-request CI, promotion gate,
+and documentation closeout.

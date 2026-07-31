@@ -4,9 +4,9 @@ Vision-Core v1.0.4 reads runtime settings from environment variables when
 `Settings::from_env()` constructs the default settings object. There are no
 command-line configuration flags.
 
-Invalid values for several scalar settings still fall back silently.
-`TOKIO_WORKER_THREADS` and `VISION_DATA_DIR` now have explicit startup
-validation as documented below.
+Invalid values for several non-P2P scalar settings still fall back silently.
+`TOKIO_WORKER_THREADS`, `VISION_DATA_DIR`, and the promoted P2P identity and
+seed settings have explicit startup validation as documented below.
 
 ## Variables
 
@@ -15,14 +15,14 @@ validation as documented below.
 | `VISION_DATA_DIR` | Path, e.g. `C:\vision-data` | `./data` | Empty, whitespace-only, padded, inaccessible, unwritable, file-valued, or unusable database locations fail before storage opens | Yes |
 | `VISION_HTTP_PORT` | `u16`, e.g. `7070` | `7070` | Non-numeric or out-of-range values silently use the default | Yes |
 | `VISION_P2P_PORT` | `u16`, e.g. `7072` | `7072` | Non-numeric or out-of-range values silently use the default | Yes |
-| `VISION_P2P_ADVERTISED_HOST` | Host/IP, e.g. `node.example.org` | unset | Whitespace is trimmed; an empty value becomes unset; syntax is validated later where applicable | Yes |
-| `VISION_P2P_ADVERTISED_PORT` | Nonzero `u16`, e.g. `7072` | unset | Invalid, out-of-range, and zero values become unset | Yes |
-| `VISION_ALLOW_PRIVATE_PEERS` | `1`, `true`, or another string | `true` | Only case-insensitive `true` or `1` means true; every present other value means false | Yes |
+| `VISION_P2P_ADVERTISED_HOST` | Host/IP, e.g. `node.example.org` | unset | Empty or malformed values fail; if present, the advertised port is also required | Yes |
+| `VISION_P2P_ADVERTISED_PORT` | Nonzero `u16`, e.g. `7072` | unset | Invalid, out-of-range, zero, or unpaired values fail | Yes |
+| `VISION_ALLOW_PRIVATE_PEERS` | `true` or `false` (ASCII case-insensitive) | `true` | Any other present value fails configuration loading | Yes |
 | `VISION_MINER_ADDRESS` | 64 lowercase hexadecimal characters | 64 zeroes | Invalid input silently becomes the zero address | Yes |
 | `VISION_MINING` | `1`, `true`, or another string | `false` | Only case-insensitive `true` or `1` means true; every present other value means false | Yes |
 | `VISION_MINING_THREADS` | Unsigned integer, e.g. `4` | `0` | Parse failure silently becomes zero | Parsed but currently unused |
 | `VISION_ALPHA_AIRDROP_ENABLED` | `1`, `true`, or another string | `false` | Only case-insensitive `true` or `1` means true; every present other value means false | Yes |
-| `VISION_SEED_PEERS` | Comma, semicolon, or newline-delimited addresses | Compiled `DEFAULT_SEED_PEERS` | Entries are trimmed; empty entries are removed; an explicitly empty string produces an empty list | Yes |
+| `VISION_SEED_PEERS` | Comma, semicolon, or newline-delimited socket addresses | Compiled `DEFAULT_SEED_PEERS` | An exactly empty string disables configured seeds; whitespace-only, delimiter-only, or malformed non-empty input fails configuration loading | Yes |
 
 The implemented data-directory policy is defined in
 [VISION_DATA_DIR_POLICY.md](VISION_DATA_DIR_POLICY.md). Missing input retains
@@ -48,10 +48,31 @@ The HTTP and P2P listen settings are built as `0.0.0.0:<port>`. The current
 settings model does not provide an environment variable for choosing a
 different bind host.
 
-The advertised P2P host and port are optional and are used to form durable peer
-identity information. `VISION_ALLOW_PRIVATE_PEERS` controls whether loopback,
-private, or link-local advertised addresses may be accepted. Its current
-default is permissive (`true`).
+The advertised P2P host and port are optional as a pair and are used to form
+durable peer identity information. Supplying only one member of the pair is a
+configuration error. `VISION_ALLOW_PRIVATE_PEERS` controls whether loopback,
+private, or link-local advertised addresses may be accepted. Its established
+default remains permissive (`true`) when omitted; a present value must be
+explicit `true` or `false`.
+
+When `VISION_SEED_PEERS` is omitted, compiled defaults are used. An exactly
+empty value intentionally disables configured seeds. Non-empty input is split
+on commas, semicolons, or newlines, and every retained entry must parse as a
+socket address. Invalid entries fail during configuration loading rather than
+later in a detached connection task.
+
+## Startup sequencing
+
+Configuration loading completes before storage and service startup. The P2P
+listener is bound before its listener task is detached. A P2P bind failure
+therefore aborts startup. The HTTP listener is also bound before successful
+startup is reported; an API bind failure prevents `[NODE] All services started`
+from being emitted. That message appears only after both required listeners
+have bound successfully.
+
+Configured seed dialing starts as part of service startup, but seed
+reachability is not currently a startup-readiness requirement. A node can bind
+its local listeners and continue operating with zero connected seed peers.
 
 ## Mining
 
@@ -84,10 +105,11 @@ change and must include migration notes.
 Expected future work includes:
 
 - reporting the exact invalid variable and accepted format;
-- rejecting invalid ports and boolean values;
+- rejecting invalid HTTP/P2P ports and remaining boolean values;
 - rejecting invalid miner addresses instead of substituting zeroes;
 - deciding whether to implement `VISION_CONFIG` or remove its source claim;
-- making the private-peer default and operational consequences explicit;
+- documenting the operational consequences of the preserved permissive
+  private-peer default;
 - either consuming `VISION_MINING_THREADS` or removing the setting.
 
 Operators relying on silent fallback should normalize their environment before

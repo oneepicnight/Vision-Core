@@ -29,6 +29,10 @@ state.
 - activated Configuration Hardening and promoted Tranches 1 through 4B,
   including the typed settings seam, Tokio runtime-thread validation, and
   explicit `VISION_DATA_DIR` startup validation;
+- promoted P2P configuration boundary hardening for private-peer policy,
+  seed-list validation, and complete advertised identity;
+- promoted service startup sequencing so required P2P and API listener bind
+  failures abort startup before the node reports all services started;
 - created the Project Intelligence Layer and initial decision records.
 
 Completion here describes engineering work and recorded validation. Public authority changes only after review and promotion.
@@ -37,20 +41,23 @@ Completion here describes engineering work and recorded validation. Public autho
 
 ### Configuration Hardening
 
-Status: active engineering phase. Tranches 1 through 4B are promoted; no later
-tranche is authorized yet.
+Status: active targeted operational-hardening phase. Tranches 1 through 4B,
+P2P configuration boundary hardening, and service startup sequencing are
+promoted. No later implementation tranche is authorized by this roadmap.
 
 Configuration Hardening is the current operator-behavior hardening program.
 Promoted work has already added a typed settings seam, strict
 `TOKIO_WORKER_THREADS` validation, and explicit `VISION_DATA_DIR` validation
-before storage opens.
+before storage opens. It now also validates P2P identity and seed inputs during
+configuration loading and stages required listener binds before reporting
+successful startup.
 
 Remaining approved direction includes replacing other silent fallback with
 explicit startup validation, reconciling `VISION_CONFIG`, resolving
-`VISION_MINING_THREADS`, validating mining configuration, clarifying
-private-peer policy, and documenting operator migration. Each later behavior
-change still requires its own authorization, validation, review branch,
-pull-request CI, and promotion gate.
+`VISION_MINING_THREADS`, validating mining configuration, improving readiness
+and degraded-state observability, and documenting operator migration. Each
+later behavior change still requires its own authorization, validation, review
+branch, pull-request CI, and promotion gate.
 
 ### Repository polish
 
@@ -149,7 +156,8 @@ Status: planned architecture; designs and interfaces are not yet approved protoc
 
 ### Node usability
 
-- add observable health and readiness;
+- design and add separately observable liveness, startup readiness, network
+  readiness, chain readiness, mining readiness, and degraded operation;
 - improve peer and synchronization visibility;
 - produce safe backup, restore, and upgrade flows;
 - define deployment profiles and resource guidance.

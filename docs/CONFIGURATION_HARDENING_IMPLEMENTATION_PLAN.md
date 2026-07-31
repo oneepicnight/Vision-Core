@@ -296,24 +296,28 @@ must remain cross-platform safe.
 
 ### Commit 6 — Validate P2P identity and seed configuration
 
+**Status:** Completed and promoted as
+`9a2099273127d6c8135bada8b8bab47c9190c25e`.
+
 **Purpose**
 
 Validate seed socket addresses before launching connection tasks, validate
-advertised host and port as a coherent pair, and produce actionable errors.
-Stage or acknowledge the inbound listener bind before reporting services
-started so a bind failure cannot leave the process running without its expected
-P2P listener.
+advertised host and port as a coherent pair, preserve the established
+private-peer default when omitted, and produce actionable errors.
 
-The private-peer default, explicit-empty seed-list policy, and whether partial
-advertised identity is rejected are Owner Decision Required before this
-commit. Do not change protocol version, handshake encoding, or peer validation
-rules.
+The approved policy preserves the permissive private-peer default, accepts only
+explicit `true` or `false` values, treats an exactly empty seed-list value as an
+intentional override, rejects malformed non-empty seed input, and rejects
+partial advertised identity. Protocol version, handshake encoding, and peer
+validation rules remain unchanged.
 
 **Expected files**
 
 - `src/config/settings.rs`;
-- `src/node/services.rs` or `src/node/bootstrap.rs` only for startup staging;
 - P2P configuration and handshake tests.
+
+The promoted implementation changed only `src/config/settings.rs` and
+`src/main.rs`. Startup staging was deliberately separated into its own commit.
 
 **Risk level:** Medium to high.
 
@@ -335,6 +339,52 @@ restore the earlier executable.
 
 **Estimated review difficulty:** High due to reachability and compatibility
 effects.
+
+**Completion evidence**
+
+- focused settings tests: 18 passed;
+- focused watchdog: passed;
+- VisionX suite: passed;
+- full release suite: 540 passed, 0 failed, 1 ignored;
+- pull-request and post-promotion CI: passed.
+
+### Startup sequencing closeout — Bind required listeners before readiness
+
+**Status:** Completed and promoted as
+`da72260dcb9cb66971c433e05a6633a4800dfe4d`.
+
+**Purpose**
+
+Bind the P2P listener before detaching its task, make listener bind failure a
+startup error, bind the HTTP listener before reporting successful startup, and
+emit `[NODE] All services started` only after both required listeners bind.
+Seed-peer reachability remains outside the startup-readiness policy.
+
+**Changed files**
+
+- `src/main.rs`;
+- `src/node/services.rs`;
+- `src/p2p/connection.rs`;
+- `src/tests/multi_node.rs`.
+
+**Risk level:** Medium. Observable service-lifecycle behavior changed for bind
+failures; consensus, protocol, persistence, mining, and serialization did not.
+
+**Validation requirements and completion evidence**
+
+- focused startup/service tests: passed;
+- representative multi-node validation: passed;
+- focused watchdog: 1 passed;
+- VisionX: 43 passed, 0 failed;
+- full release suite: 544 passed, 0 failed, 1 ignored;
+- cargo check, formatting, Clippy baseline reporting, pull-request CI, and
+  post-promotion CI: passed.
+
+**Rollback complexity:** Low. Revert the isolated commit; no data or protocol
+migration is required.
+
+**Estimated review difficulty:** Moderate because lifecycle ordering and
+truthful readiness reporting must remain aligned.
 
 ### Commit 7 — Enforce safe mining configuration
 
@@ -504,6 +554,7 @@ does not add evidence proportional to the phase’s risk.
 | 4 — Scalar syntax | Required | Required | Required | Required | No | No | No | No | No | Required | Required |
 | 5 — Data directory | Required | Required | No | No | Required | Required | Required | Required | Required | Required | Required |
 | 6 — P2P identity/seeds | Required | Required | Required | Required | No | No | No | No | No | Required | Required |
+| Startup sequencing | Required | Required | Required | Required | No | No | No | No | No | Required | Required |
 | 7 — Mining | Required | Required | Required | Required | No | No | No | No | Required | Required | Required |
 | 8 — Alpha API flag | Required | Required | Required | Required | No | No | No | No | No | Required | Required |
 | 9A — Remove file claim | Required | Required | No | No | No | No | No | No | No | Required | Required |

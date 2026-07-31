@@ -15,11 +15,16 @@ describe planned functionality.
 6. Create shared chain, peer-manager, mempool, optional miner-manager, and
    recovery-state objects.
 7. Load compiled or configured seed peers into the peer manager.
-8. Start P2P, synchronization, keepalive, and optional mining services.
-9. Construct HTTP API state and serve the Axum router.
+8. Bind the P2P listener, then detach its listener task and start
+   synchronization, keepalive, seed dialing, and optional mining services.
+9. Construct HTTP API state and bind the Axum listener.
+10. Report all services started only after both required listener binds
+    succeed, then serve the Axum router.
 
-The HTTP server is the final awaited service. Startup errors propagate to
-`main`, are logged as fatal, and terminate the process with status 1.
+The HTTP server is the final awaited service. P2P or HTTP bind failures
+propagate to `main` before successful startup is reported, are logged as fatal,
+and terminate the process with status 1. Seed-peer reachability is reported
+separately and is not currently a requirement for local startup success.
 
 ## Module ownership
 
