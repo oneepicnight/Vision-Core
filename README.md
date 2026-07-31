@@ -63,9 +63,9 @@ Supported variables include:
 | --- | --- | --- | --- |
 | `VISION_DATA_DIR` | path string | `./data` | Yes |
 | `VISION_HTTP_PORT` | `u16` | `7070` | Yes |
-| `VISION_P2P_PORT` | `u16` | `7072` | Yes |
+| `VISION_P2P_PORT` | `u16` or `auto` | `7072` | Yes |
 | `VISION_P2P_ADVERTISED_HOST` | non-empty string | unset | Yes |
-| `VISION_P2P_ADVERTISED_PORT` | nonzero `u16` | unset | Yes |
+| `VISION_P2P_ADVERTISED_PORT` | nonzero `u16` or `auto` | unset | Yes |
 | `VISION_ALLOW_PRIVATE_PEERS` | explicit `true` or `false` | `true` | Yes |
 | `VISION_MINER_ADDRESS` | 64 lowercase hex characters | 64 zeroes | Yes |
 | `VISION_MINING` | boolean-like string | `false` | Yes |
@@ -80,6 +80,11 @@ when invalid; an exactly empty seed list intentionally disables configured
 seeds. `VISION_CONFIG` is mentioned in source documentation but is not
 presently read. Exact behavior and examples are in
 [Configuration](docs/CONFIGURATION.md).
+
+Automatic P2P port mode deterministically selects a local port from the routed
+IP. It does not open a firewall or configure router/NAT forwarding. Operators
+must still make the selected seed port reachable from the networks that will
+dial it.
 
 ## HTTP API
 

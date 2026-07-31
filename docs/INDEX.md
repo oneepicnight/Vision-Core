@@ -17,7 +17,7 @@ base. It does not define policy. Follow the linked controlling documents.
 | You need the current maturity assessment | [Current-State Assessment](VISION_CORE_CURRENT_STATE_ASSESSMENT.md) |
 | You are designing health or readiness | [Readiness and Health Model Design](READINESS_HEALTH_MODEL_DESIGN.md) |
 | You are tracing current startup readiness boundaries | [Readiness Lifecycle Characterization](READINESS_LIFECYCLE_CHARACTERIZATION.md) |
-| You are preparing a distributed P2P soak | [P2P Internet Soak Characterization](P2P_INTERNET_SOAK_CHARACTERIZATION.md) |
+| You are preparing a distributed P2P soak | [Four-Node Internet Soak Runbook](P2P_48_HOUR_SOAK_RUNBOOK.md), then [P2P Internet Soak Characterization](P2P_INTERNET_SOAK_CHARACTERIZATION.md) |
 
 ## New Contributor Path
 
@@ -83,6 +83,7 @@ Read:
 5. [Deterministic Watchdog Testing Decision](DECISIONS/0007_deterministic_watchdog_testing.md)
 6. [Dead-Code Ledger: Node and P2P Findings](DEAD_CODE_LEDGER.md#node-and-p2p-findings)
 7. [P2P Internet Soak Characterization](P2P_INTERNET_SOAK_CHARACTERIZATION.md)
+8. [Four-Node Internet Soak Runbook](P2P_48_HOUR_SOAK_RUNBOOK.md)
 
 Networking changes must preserve unified block validation, deterministic
 synchronization state transitions, compatibility identity, watchdog recovery,

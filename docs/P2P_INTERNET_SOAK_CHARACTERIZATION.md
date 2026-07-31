@@ -2,163 +2,130 @@
 
 ## Status and scope
 
-This document characterizes the promoted Vision-Core P2P implementation for a
-planned 48-hour, four-node rehearsal. The intended participants are two
-physical laptops and two virtual machines, with every node configured to mine
-and one node serving as the configured seed.
+This document records the engineering boundary for the planned 48-hour,
+four-node rehearsal: two physical laptops, two virtual machines, all four
+mining independently, and one laptop used as the initial seed.
 
-This tranche does not change production behavior, consensus, protocol
-versions, wire messages, synchronization policy, mining policy, persistence,
-configuration, or startup sequencing. The added Rust assertion is test-only
-and records existing inbound-message behavior.
+The original characterization identified block dissemination as the blocking
+runtime gap. The current review candidate addresses that gap without changing
+block validity, cumulative-work fork choice, proof of work, VisionX,
+serialization, genesis, persistence format, state-root calculation, or the P2P
+protocol version and existing wire-message layout.
 
-## Readiness conclusion
+The candidate must still complete remote review, CI, promotion, and a short
+four-node dry run before the 48-hour clock begins. Operational instructions are
+in [P2P_48_HOUR_SOAK_RUNBOOK.md](P2P_48_HOUR_SOAK_RUNBOOK.md).
 
-The current implementation is suitable for controlled local synchronization
-and reconnect testing, but it is **not yet ready for the proposed 48-hour
-all-miner star-topology soak**.
+## Implemented dissemination path
 
-The blocking issue is block dissemination. The runtime defines
-`AnnounceBlock` and `Block` messages, but a successfully mined block is not
-broadcast to connected peers. The inbound connection loop also does not import
-an unsolicited announcement or block. Configured seed loops pull a
-higher-work chain from the seed they dial, but the seed does not continuously
-poll every inbound leaf for new work. A leaf miner can therefore advance its
-own chain without reliably causing the seed or other leaves to learn about the
-new block.
+The candidate uses the existing `AnnounceBlock`, `GetBlock`, and `Block` wire
+messages to provide a bounded relay path:
 
-Starting the 48-hour all-miner run before this boundary is addressed could
-produce persistent competing local chains while each process appears alive.
+1. a locally accepted canonical block is announced to live peer sessions;
+2. a peer requests an unknown announced block;
+3. the full block enters one bounded inbound queue;
+4. the block passes through the ordinary local block-acceptance pipeline;
+5. an accepted canonical block is announced onward, excluding its immediate
+   source;
+6. duplicate or already-known blocks do not create an unbounded relay loop.
 
-## Observed topology behavior
+Mining jobs carry the canonical parent identity. A peer block that advances the
+canonical tip cancels stale local work so a miner does not continue competing
+on an obsolete parent until the next polling interval.
 
-### Listener and startup
+## Discovery and connection lifecycle
 
-- P2P listens on `0.0.0.0` and the configured `VISION_P2P_PORT`.
-- Failure to bind the P2P listener aborts startup before the node reports all
-  services started.
-- HTTP and P2P ports must be unique for nodes sharing one operating-system
-  network namespace.
+Successful handshakes exchange a bounded list of dialable known peers. Newly
+learned addresses enter a dialing supervisor that maintains multiple outbound
+sessions. This is handshake-time exchange, not continuous peer-list gossip.
+A connected star can still disseminate blocks even if leaves never become
+directly connected to one another.
 
-### Seed dialing
+Each process generates a distinct node nonce, preventing separate machines
+using the same listen address from being misclassified as self-connections.
+Inbound disconnects clear peer height, tip, work, and connected state
+immediately. Cleanup is generation-aware, so a delayed close from an older
+session cannot disconnect a newer replacement session for the same peer.
 
-- `VISION_SEED_PEERS` accepts IP-literal socket addresses.
-- An omitted value uses the compiled default seeds.
-- An exactly empty value disables configured seeds.
-- A configured seed task retries indefinitely with a two-second delay after a
-  failed connection or handshake.
-- Seed reachability is asynchronous and does not currently determine startup
-  success.
+## Automatic port behavior
 
-### Handshake and identity
+`VISION_P2P_PORT=auto` derives a stable local TCP port in the range 20000
+through 59999 from the routed local IP. `VISION_P2P_ADVERTISED_PORT=auto` uses
+that resolved listen port when paired with an explicit advertised host. The
+startup banner reports the selected P2P address.
 
-- Peers verify protocol, chain, genesis, economics, proof parameters, and
-  self-connection identity during the handshake.
-- Advertised identity is optional, but host and port must be supplied together
-  when configured.
-- Private, loopback, and link-local advertised identities are accepted under
-  the preserved default `VISION_ALLOW_PRIVATE_PEERS=true` policy.
-- The repository provides no automatic NAT discovery or port mapping through
-  UPnP, NAT-PMP, PCP, STUN, TURN, or relay services.
+This is local port selection only. Vision-Core does not discover the public IP,
+open Windows Firewall, or establish UPnP, NAT-PMP, PCP, STUN, TURN, or relay
+services. Router reachability remains an explicit operator responsibility.
 
-### Synchronization and recovery
+## Topology implications
 
-- Configured outbound seed sessions poll the seed's chain summary and pull
-  blocks when the seed advertises greater cumulative work.
-- Downloaded blocks still pass through ordinary local block validation.
-- The deterministic watchdog can recover synchronization from a failed or
-  malicious candidate peer when a valid higher-work peer is available.
-- The existing multi-node suite demonstrates local convergence and reconnect
-  through explicit synchronization operations.
-- Current inbound sessions do not provide continuous reverse summary polling,
-  and current mining success does not emit a block announcement.
+Two laptops on one household router share a public IPv4 address. The second
+laptop should dial the seed over its LAN address unless NAT loopback has been
+verified. Genuinely remote VMs can dial the public IPv4 address and the seed's
+forwarded TCP port. VMs hosted behind the same router are not independent
+internet paths.
 
-### Mining
+Only the seed needs inbound public reachability for the planned star-assisted
+rehearsal. A fully inbound-reachable mesh would need a distinct external port
+mapping for each participant. Nodes that cannot accept inbound traffic should
+not advertise an unreachable identity.
 
-- Mining requires at least one connected peer.
-- With a one-seed star, each leaf can satisfy that gate through its outbound
-  seed session, and the seed can satisfy it through an inbound session.
-- `VISION_MINING_THREADS` is parsed but is not currently consumed by the
-  mining runtime.
-- An invalid `VISION_MINER_ADDRESS` currently falls back to the zero address;
-  mining-identity hardening remains a separate policy and implementation
-  concern.
-- Peer-count eligibility does not prove that locally mined work will propagate
-  through the star topology.
+The HTTP API should remain local or explicitly protected. It has no built-in
+TLS or authentication and is not required for P2P reachability.
 
-## Network-addressing constraints
+## Preserved safety boundaries
 
-If all four participants are behind the same household router, they share one
-public IPv4 address. That arrangement exercises the public address only when
-the router supports NAT loopback, also called hairpin NAT. Without that
-feature, local participants may be unable to reach the seed through the
-router's public address even though an outside host could.
+- A peer announcement is never authority; received blocks undergo ordinary
+  validation.
+- Cumulative work remains the chain-selection rule.
+- The deterministic synchronization watchdog remains active.
+- No database, snapshot, or state-root format changes are included.
+- No consensus, proof-of-work, VisionX, or mining-algorithm changes are
+  included.
+- Existing protocol identity and wire encoding remain unchanged.
+- Per-session channels and shared-peer lists are bounded.
 
-One external TCP port can forward to only one internal P2P listener. Giving all
-four nodes inbound reachability therefore requires four distinct external TCP
-ports mapped to the corresponding internal node ports. A seed-only forwarding
-plan needs only the seed's external TCP port, but it leaves the topology with
-the reverse-discovery and dissemination limitations described above.
+## Validation evidence
 
-A genuinely internet-routed rehearsal requires at least one participant on a
-different upstream network. Locally hosted virtual machines using bridged or
-NAT networking behind the same router do not create an independent internet
-path. Cloud-hosted virtual machines would.
+The local candidate passed:
 
-The HTTP API should not be exposed through the router for this rehearsal. It
-has no built-in authentication or TLS. Vision Desktop should reach Core over a
-local or otherwise explicitly protected interface.
+- focused connection, peer-manager, service, synchronization, and mining tests;
+- deterministic watchdog recovery;
+- VisionX validation;
+- `cargo check --all-targets --locked --offline`;
+- formatting and diff checks;
+- the single-threaded release suite after each isolated runtime concern.
 
-## Evidence added by this tranche
+At the current candidate tip, the release suite completed with 565 tests:
+564 passed, 0 failed, and 1 ignored. The compiler-warning baseline is 57 normal
+target warnings and 29 test-target warnings. The reduction from 58/30 is a
+direct consequence of activating the previously unused outbound-peer target;
+no lint suppression was added.
 
-`p2p::connection::tests::inbound_announcements_and_blocks_do_not_change_chain_without_sync`
-performs a valid handshake, sends an announcement and a full block, uses a
-Ping/Pong exchange as a deterministic processing barrier, and confirms that
-the inbound path has not changed local chain state. The test records the
-current boundary; it does not endorse that boundary as the desired design.
+## Remaining operational risks
 
-## Required implementation before the all-miner soak
+Remote CI and real multi-machine behavior cannot be proven by local unit and
+integration tests. The dry run must specifically verify:
 
-The next behavior tranche should define and implement one coherent block
-dissemination path:
+- router forwarding and Windows Firewall behavior;
+- seed access from both the LAN and actual remote path;
+- block propagation from every miner, including leaf-to-seed relay;
+- convergence after simultaneous block discovery;
+- reconnect and catch-up after peer and seed interruptions;
+- restart from each existing `chain.db`;
+- bounded CPU, memory, disk, and log growth.
 
-1. announce a locally accepted canonical block to applicable connected peers;
-2. handle announcements without trusting peer claims;
-3. request or receive the announced block through a bounded path;
-4. route the block through unified block acceptance;
-5. avoid announcement loops and duplicate downloads;
-6. preserve cumulative-work fork choice and deterministic watchdog recovery;
-7. expose enough diagnostics to distinguish connected, synchronized, and
-   partitioned miners.
+Automatic port derivation is deterministic but not collision-proof. A routed
+IP change can change the selected port. Peer lists are exchanged only on
+handshake, and the current `/peers` endpoint is not connected to live state;
+operators must use `/status` peer counters and structured logs for evidence.
 
-That tranche is networking- and protocol-sensitive even if it reuses existing
-wire variants. It requires separate owner authorization and the P2P validation
-matrix in `TESTING_POLICY.md`.
+## Entry verdict
 
-## Soak entry gates
-
-Before beginning the 48-hour run, verify all of the following:
-
-- the dissemination tranche is promoted and post-promotion CI is green;
-- four unique data directories are configured and initially clean;
-- every miner uses an intentionally selected valid reward address;
-- the seed has a stable LAN address and an explicit TCP port-forward;
-- Windows Firewall permits the selected P2P TCP port on the seed;
-- every node uses the same Vision-Core commit, protocol identity, and genesis;
-- seed reachability is tested from the actual network path each node will use;
-- the router's NAT-loopback behavior is known if public-address hairpinning is
-  part of the test;
-- HTTP APIs remain local or protected;
-- logs, `/status` snapshots, process exits, chain height, tip hash, cumulative
-  work, peer counts, recovery state, and mining state are collected throughout
-  the run;
-- planned restart, seed outage, peer churn, and reconnection checkpoints have
-  explicit expected outcomes.
-
-## Characterization verdict
-
-Do not start the all-miner 48-hour soak on the current runtime. First review and
-implement block dissemination as an isolated networking tranche. A shorter
-single-miner dry run may still be useful after the exact topology and NAT path
-are verified, because every non-mining leaf can pull the seed's higher-work
-chain through its configured outbound seed session.
+The candidate closes the source-level dissemination blocker identified by the
+original characterization. Do not call the system internet-soak validated yet.
+First promote the exact reviewed candidate, obtain green post-promotion CI,
+execute the 30-minute four-node dry run in the runbook, and confirm that blocks
+mined by each participant reach and converge on all others. A successful dry
+run is the final gate for starting the 48-hour rehearsal.

@@ -14,9 +14,9 @@ seed settings have explicit startup validation as documented below.
 | --- | --- | --- | --- | --- |
 | `VISION_DATA_DIR` | Path, e.g. `C:\vision-data` | `./data` | Empty, whitespace-only, padded, inaccessible, unwritable, file-valued, or unusable database locations fail before storage opens | Yes |
 | `VISION_HTTP_PORT` | `u16`, e.g. `7070` | `7070` | Non-numeric or out-of-range values silently use the default | Yes |
-| `VISION_P2P_PORT` | `u16`, e.g. `7072` | `7072` | Non-numeric or out-of-range values silently use the default | Yes |
+| `VISION_P2P_PORT` | `u16` or `auto` | `7072` | `auto` derives a stable high port from the routed local IP; other non-numeric or out-of-range values silently use the default | Yes |
 | `VISION_P2P_ADVERTISED_HOST` | Host/IP, e.g. `node.example.org` | unset | Empty or malformed values fail; if present, the advertised port is also required | Yes |
-| `VISION_P2P_ADVERTISED_PORT` | Nonzero `u16`, e.g. `7072` | unset | Invalid, out-of-range, zero, or unpaired values fail | Yes |
+| `VISION_P2P_ADVERTISED_PORT` | Nonzero `u16` or `auto` | unset | `auto` uses the resolved listen port; invalid, out-of-range, zero, or unpaired values fail | Yes |
 | `VISION_ALLOW_PRIVATE_PEERS` | `true` or `false` (ASCII case-insensitive) | `true` | Any other present value fails configuration loading | Yes |
 | `VISION_MINER_ADDRESS` | 64 lowercase hexadecimal characters | 64 zeroes | Invalid input silently becomes the zero address | Yes |
 | `VISION_MINING` | `1`, `true`, or another string | `false` | Only case-insensitive `true` or `1` means true; every present other value means false | Yes |
@@ -55,11 +55,33 @@ private, or link-local advertised addresses may be accepted. Its established
 default remains permissive (`true`) when omitted; a present value must be
 explicit `true` or `false`.
 
+`VISION_P2P_PORT=auto` derives a deterministic port in the inclusive range
+`20000` through `59999` from the routed local IP detected at startup. The same
+IP produces the same port, while different IPs normally produce different
+ports; the finite range does not guarantee collision-free assignment. Startup
+fails if no routed local IP can be determined or if the selected port cannot
+be bound. The startup banner reports the resolved P2P address.
+
+When a complete advertised identity is required,
+`VISION_P2P_ADVERTISED_PORT=auto` publishes the resolved listen port and still
+requires `VISION_P2P_ADVERTISED_HOST`. Automatic port mode does not discover a
+public address, configure Windows Firewall, or create a router mapping through
+UPnP, NAT-PMP, or PCP. The advertised host and any required inbound port
+forward remain explicit operator decisions.
+
 When `VISION_SEED_PEERS` is omitted, compiled defaults are used. An exactly
 empty value intentionally disables configured seeds. Non-empty input is split
 on commas, semicolons, or newlines, and every retained entry must parse as a
 socket address. Invalid entries fail during configuration loading rather than
 later in a detached connection task.
+
+Peers exchange a bounded set of dialable peer addresses during successful
+handshakes. Newly learned addresses enter the outbound dialing supervisor,
+which maintains multiple outbound connections. This is handshake-time peer
+exchange, not continuous peer-list gossip. Accepted canonical blocks are
+announced to live peer sessions, requested through bounded per-session queues,
+validated through the ordinary block-acceptance path, and relayed onward
+without sending them back to their immediate source.
 
 ## Startup sequencing
 
