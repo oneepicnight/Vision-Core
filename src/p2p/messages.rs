@@ -200,11 +200,13 @@ mod tests {
 
     #[test]
     fn handshake_round_trips() {
-        let hs = HandshakeMessage::new(10, 12345);
+        let mut hs = HandshakeMessage::new(10, 12345);
+        hs.seed_peers = vec!["127.0.0.1:7072".to_string()];
         match rt(&P2PMessage::Handshake(hs)) {
             P2PMessage::Handshake(h) => {
                 assert_eq!(h.chain_height, 10);
                 assert_eq!(h.node_nonce, 12345);
+                assert_eq!(h.seed_peers, vec!["127.0.0.1:7072"]);
             }
             _ => panic!("wrong variant"),
         }

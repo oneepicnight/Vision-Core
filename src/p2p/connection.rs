@@ -27,6 +27,7 @@ const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
 /// the current tip through the existing height/synchronization path instead of
 /// growing an unbounded in-memory queue.
 const SESSION_OUTBOUND_CAPACITY: usize = 32;
+const MAX_SHARED_PEERS: usize = 32;
 
 #[derive(Debug)]
 pub(crate) struct InboundBlock {
@@ -150,6 +151,7 @@ pub struct P2PConnectionManager {
     allow_private_peer_addresses: bool,
     sessions: Arc<PeerSessionRegistry>,
     inbound_blocks: Option<mpsc::Sender<InboundBlock>>,
+    discovered_peers: Option<mpsc::Sender<String>>,
 }
 
 impl P2PConnectionManager {
@@ -169,6 +171,7 @@ impl P2PConnectionManager {
             allow_private_peer_addresses: true,
             sessions: Arc::new(PeerSessionRegistry::new()),
             inbound_blocks: None,
+            discovered_peers: None,
         }
     }
 
@@ -195,12 +198,34 @@ impl P2PConnectionManager {
         self
     }
 
+    pub(crate) fn with_peer_discovery(mut self, discovered_peers: mpsc::Sender<String>) -> Self {
+        self.discovered_peers = Some(discovered_peers);
+        self
+    }
+
     pub(crate) fn sessions(&self) -> Arc<PeerSessionRegistry> {
         self.sessions.clone()
     }
 
     pub(crate) fn announce_block(&self, block: &Block, exclude_peer: Option<&str>) -> usize {
         self.sessions.announce_block(block, exclude_peer)
+    }
+
+    pub(crate) fn is_local_dial_address(&self, addr: SocketAddr) -> bool {
+        if addr == self.listen_addr {
+            return true;
+        }
+        if self.listen_addr.ip().is_unspecified()
+            && addr.port() == self.listen_addr.port()
+            && addr.ip().is_loopback()
+        {
+            return true;
+        }
+        matches!(
+            (self.advertised_ip.as_deref(), self.advertised_port),
+            (Some(host), Some(port))
+                if port == addr.port() && host.parse::<std::net::IpAddr>().ok() == Some(addr.ip())
+        )
     }
 
     pub(crate) async fn queue_inbound_block(&self, block: Block, peer_addr: String) -> Result<()> {
@@ -215,12 +240,14 @@ impl P2PConnectionManager {
     }
 
     pub(crate) fn local_handshake(&self, chain_height: u64) -> HandshakeMessage {
-        HandshakeMessage::new_with_advertised(
+        let mut handshake = HandshakeMessage::new_with_advertised(
             chain_height,
             self.local_node_nonce,
             self.advertised_ip.clone(),
             self.advertised_port,
-        )
+        );
+        handshake.seed_peers = self.peer_manager.dialable_addresses(MAX_SHARED_PEERS);
+        handshake
     }
 
     /// Nonce used in the local handshake for self-connection detection.
@@ -248,6 +275,7 @@ impl P2PConnectionManager {
                     let allow_private = self.allow_private_peer_addresses;
                     let sessions = self.sessions.clone();
                     let inbound_blocks = self.inbound_blocks.clone();
+                    let discovered_peers = self.discovered_peers.clone();
                     tokio::spawn(async move {
                         handle_inbound_with_runtime(
                             stream,
@@ -260,6 +288,7 @@ impl P2PConnectionManager {
                             allow_private,
                             sessions,
                             inbound_blocks,
+                            discovered_peers,
                         )
                         .await;
                     });
@@ -389,6 +418,7 @@ async fn handle_inbound_with_runtime<S>(
     allow_private_peer_addresses: bool,
     sessions: Arc<PeerSessionRegistry>,
     inbound_blocks: Option<mpsc::Sender<InboundBlock>>,
+    discovered_peers: Option<mpsc::Sender<String>>,
 ) where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
@@ -437,12 +467,13 @@ async fn handle_inbound_with_runtime<S>(
                         }
 
                         let our_height = chain.lock().await.current_height();
-                        let local_hs = HandshakeMessage::new_with_advertised(
+                        let mut local_hs = HandshakeMessage::new_with_advertised(
                             our_height,
                             local_node_nonce,
                             advertised_ip.clone(),
                             advertised_port,
                         );
+                        local_hs.seed_peers = peer_manager.dialable_addresses(MAX_SHARED_PEERS);
                         let validation = validate_handshake(&remote_hs, local_node_nonce);
 
                         match validation {
@@ -466,6 +497,13 @@ async fn handle_inbound_with_runtime<S>(
                                     remote_hs.chain_height,
                                     false,
                                 );
+                                if let Some(discovered_peers) = discovered_peers.as_ref() {
+                                    for candidate in
+                                        remote_hs.seed_peers.iter().take(MAX_SHARED_PEERS)
+                                    {
+                                        let _ = discovered_peers.try_send(candidate.clone());
+                                    }
+                                }
                                 tracing::info!(
                                     "[P2P] {} handshake complete local_height={} remote_height={}",
                                     peer_key,
@@ -709,6 +747,7 @@ async fn handle_inbound<S>(
         advertised_port,
         allow_private_peer_addresses,
         Arc::new(PeerSessionRegistry::new()),
+        None,
         None,
     )
     .await;
@@ -965,6 +1004,7 @@ mod tests {
             true,
             Arc::new(PeerSessionRegistry::new()),
             Some(block_sender),
+            None,
         ));
 
         let remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -998,6 +1038,71 @@ mod tests {
             .expect("inbound block should reach the unified importer");
         assert_eq!(inbound.block.hash().to_string(), block_hash);
         assert_eq!(inbound.peer_addr, addr.to_string());
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn local_handshake_shares_only_dialable_known_peers() {
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        peer_manager.upsert("127.0.0.1:19020", true);
+        let transient = HandshakeMessage::new(0, 91);
+        peer_manager
+            .resolve_inbound_peer_key("127.0.0.1:51000", &transient, true)
+            .unwrap();
+        let manager =
+            P2PConnectionManager::new("127.0.0.1:19019".parse().unwrap(), chain, peer_manager);
+
+        assert_eq!(
+            manager.local_handshake(0).seed_peers,
+            vec!["127.0.0.1:19020"]
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_handshake_forwards_bounded_peer_candidates() {
+        let addr: SocketAddr = "127.0.0.1:19018".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let sessions = Arc::new(PeerSessionRegistry::new());
+        let (candidate_sender, mut candidate_receiver) = mpsc::channel(64);
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound_with_runtime(
+            server,
+            addr,
+            chain,
+            peer_manager,
+            local_nonce,
+            None,
+            None,
+            true,
+            sessions,
+            None,
+            Some(candidate_sender),
+        ));
+
+        let mut remote = HandshakeMessage::new(0, local_nonce + 1);
+        remote.seed_peers = (0..40)
+            .map(|index| format!("127.0.0.1:{}", 20000 + index))
+            .collect();
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
+        accepted_handshake_response(recv_message(&mut client).await.unwrap(), local_nonce);
+
+        let mut candidates = Vec::new();
+        while let Ok(candidate) = candidate_receiver.try_recv() {
+            candidates.push(candidate);
+        }
+        assert_eq!(candidates.len(), MAX_SHARED_PEERS);
+        assert_eq!(candidates[0], "127.0.0.1:20000");
+        assert_eq!(candidates[31], "127.0.0.1:20031");
 
         drop(client);
         timeout(Duration::from_secs(2), handle)

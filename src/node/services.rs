@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,14 +7,14 @@ use anyhow::Result;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::chain::{apply_block, AcceptResult, ChainState};
-use crate::config::constants::{BLOCK_TARGET_TXS, MIN_PEERS_FOR_MINING};
+use crate::config::constants::{BLOCK_TARGET_TXS, MIN_PEERS_FOR_MINING, TARGET_OUTBOUND_PEERS};
 use crate::config::settings::Settings;
 use crate::mempool::Mempool;
 use crate::miner::MinerManager;
 use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, InboundBlock, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
-use crate::p2p::peer_manager::{PeerManager, PeerState};
+use crate::p2p::peer_manager::{validate_dial_address, PeerManager, PeerState};
 use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
 use crate::p2p::sync::SyncGuard;
 use crate::types::transaction::canonical_tx_id;
@@ -32,6 +33,7 @@ pub async fn start_services(
 ) -> Result<()> {
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
     let (inbound_block_sender, inbound_block_receiver) = mpsc::channel(64);
+    let (discovered_peer_sender, discovered_peer_receiver) = mpsc::channel(128);
     let conn_mgr = Arc::new(
         P2PConnectionManager::new_with_advertised(
             p2p_addr,
@@ -41,7 +43,8 @@ pub async fn start_services(
             settings.p2p_advertised_port,
             settings.allow_private_peer_addresses,
         )
-        .with_block_receiver(inbound_block_sender),
+        .with_block_receiver(inbound_block_sender)
+        .with_peer_discovery(discovered_peer_sender.clone()),
     );
     let listener = conn_mgr.bind_listener().await?;
 
@@ -71,24 +74,31 @@ pub async fn start_services(
         });
     }
 
-    if !settings.seed_peers.is_empty() {
-        for seed_peer in settings.seed_peers.clone() {
-            let chain_ref = chain.clone();
-            let peer_manager_ref = peer_manager.clone();
-            let conn_mgr_ref = conn_mgr.clone();
-            let mempool_ref = mempool.clone();
-            let recovery_ref = recovery_state.clone();
-            tokio::spawn(async move {
-                seed_peer_loop(
-                    chain_ref,
-                    peer_manager_ref,
-                    conn_mgr_ref,
-                    mempool_ref,
-                    seed_peer,
-                    recovery_ref,
-                )
-                .await;
-            });
+    {
+        let chain_ref = chain.clone();
+        let peer_manager_ref = peer_manager.clone();
+        let conn_mgr_ref = conn_mgr.clone();
+        let mempool_ref = mempool.clone();
+        let recovery_ref = recovery_state.clone();
+        let discovery_sender_ref = discovered_peer_sender.clone();
+        let allow_private = settings.allow_private_peer_addresses;
+        tokio::spawn(async move {
+            peer_dial_supervisor(
+                discovered_peer_receiver,
+                discovery_sender_ref,
+                chain_ref,
+                peer_manager_ref,
+                conn_mgr_ref,
+                mempool_ref,
+                recovery_ref,
+                allow_private,
+            )
+            .await;
+        });
+        for seed_peer in &settings.seed_peers {
+            discovered_peer_sender
+                .try_send(seed_peer.clone())
+                .map_err(|_| anyhow::anyhow!("peer discovery queue unavailable at startup"))?;
         }
     }
 
@@ -229,6 +239,66 @@ pub async fn start_services(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn peer_dial_supervisor(
+    mut candidates: mpsc::Receiver<String>,
+    discovered_peer_sender: mpsc::Sender<String>,
+    chain: Arc<Mutex<ChainState>>,
+    peer_manager: Arc<PeerManager>,
+    conn_mgr: Arc<P2PConnectionManager>,
+    mempool: Arc<Mempool>,
+    recovery_state: Arc<RecoveryState>,
+    allow_private: bool,
+) {
+    let mut scheduled = HashSet::new();
+    while let Some(candidate) = candidates.recv().await {
+        let peer_socket = match validate_dial_address(&candidate, allow_private) {
+            Ok(peer_socket) => peer_socket,
+            Err(error) => {
+                tracing::debug!("[P2P] ignored discovered peer {}: {}", candidate, error);
+                continue;
+            }
+        };
+        let peer_addr = peer_socket.to_string();
+        if conn_mgr.is_local_dial_address(peer_socket) {
+            tracing::trace!("[P2P] ignored self peer candidate {}", peer_addr);
+            continue;
+        }
+        if !scheduled.insert(peer_addr.clone()) {
+            continue;
+        }
+        if scheduled.len() > TARGET_OUTBOUND_PEERS {
+            scheduled.remove(&peer_addr);
+            tracing::debug!(
+                "[P2P] ignored peer {} after reaching outbound target {}",
+                peer_addr,
+                TARGET_OUTBOUND_PEERS
+            );
+            continue;
+        }
+
+        peer_manager.upsert(&peer_addr, true);
+        let chain_ref = chain.clone();
+        let peer_manager_ref = peer_manager.clone();
+        let conn_mgr_ref = conn_mgr.clone();
+        let mempool_ref = mempool.clone();
+        let recovery_ref = recovery_state.clone();
+        let discovery_sender_ref = discovered_peer_sender.clone();
+        tokio::spawn(async move {
+            seed_peer_loop(
+                chain_ref,
+                peer_manager_ref,
+                conn_mgr_ref,
+                mempool_ref,
+                peer_addr,
+                recovery_ref,
+                discovery_sender_ref,
+            )
+            .await;
+        });
+    }
+}
+
 async fn import_announced_blocks(
     mut receiver: mpsc::Receiver<InboundBlock>,
     chain: Arc<Mutex<ChainState>>,
@@ -304,6 +374,7 @@ async fn seed_peer_loop(
     mempool: Arc<Mempool>,
     peer_addr: String,
     recovery_state: Arc<RecoveryState>,
+    discovered_peer_sender: mpsc::Sender<String>,
 ) {
     let reconnect_delay = Duration::from_secs(2);
     let heartbeat_delay = Duration::from_secs(5);
@@ -369,6 +440,9 @@ async fn seed_peer_loop(
                             local_height,
                             remote_hs.chain_height
                         );
+                        for candidate in remote_hs.seed_peers.iter().take(32) {
+                            let _ = discovered_peer_sender.try_send(candidate.clone());
+                        }
                     }
                     other => {
                         let reason = match other {

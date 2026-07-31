@@ -1,7 +1,7 @@
 use crate::config::constants::{HEIGHT_POLL_RESPONSE_WINDOW_SECS, PEER_HEIGHT_STALE_SECS};
 use crate::p2p::protocol::{ChainSummary, HandshakeMessage};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -162,6 +162,22 @@ fn is_private_like_ip(ip: IpAddr) -> bool {
                 || (first & 0xffc0) == 0xfe80
         }
     }
+}
+
+pub(crate) fn validate_dial_address(
+    value: &str,
+    allow_private: bool,
+) -> Result<SocketAddr, String> {
+    let addr: SocketAddr = value
+        .parse()
+        .map_err(|_| format!("invalid peer address {value:?}"))?;
+    if addr.port() == 0 {
+        return Err(format!("peer address {value:?} uses port zero"));
+    }
+    if !allow_private && is_private_like_ip(addr.ip()) {
+        return Err(format!("private peer address {value:?} is not allowed"));
+    }
+    Ok(addr)
 }
 
 /// Thread-safe peer registry.
@@ -332,6 +348,21 @@ impl PeerManager {
     /// Return a snapshot of all peers for display/API.
     pub fn snapshot(&self) -> Vec<Peer> {
         self.peers.read().unwrap().values().cloned().collect()
+    }
+
+    /// Return a deterministic, bounded list of addresses safe to share with a
+    /// compatible peer. Transient inbound source ports are never advertised.
+    pub(crate) fn dialable_addresses(&self, limit: usize) -> Vec<String> {
+        let peers = self.peers.read().unwrap();
+        let mut addresses: Vec<String> = peers
+            .values()
+            .filter(|peer| peer.is_outbound || peer.advertised_addr.is_some())
+            .map(|peer| peer.addr.clone())
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        addresses.truncate(limit);
+        addresses
     }
 
     /// Return the address of the best height-based peer to sync from.
@@ -505,6 +536,26 @@ mod tests {
         assert_eq!(counts.durable_peers, 1);
         assert_eq!(counts.transient_connections, 1);
         assert_eq!(counts.dialable_peers, 0);
+    }
+
+    #[test]
+    fn peer_exchange_excludes_transient_inbound_source_ports() {
+        let pm = PeerManager::new();
+        let transient = HandshakeMessage::new(0, 42);
+        let transient_key = pm
+            .resolve_inbound_peer_key("127.0.0.1:51000", &transient, true)
+            .unwrap();
+        pm.upsert("127.0.0.1:9001", true);
+
+        assert_eq!(transient_key, "127.0.0.1:51000");
+        assert_eq!(pm.dialable_addresses(16), vec!["127.0.0.1:9001"]);
+    }
+
+    #[test]
+    fn dial_address_validation_rejects_port_zero_and_private_public_mode() {
+        assert!(validate_dial_address("127.0.0.1:0", true).is_err());
+        assert!(validate_dial_address("127.0.0.1:9001", false).is_err());
+        assert!(validate_dial_address("198.51.100.9:9001", false).is_ok());
     }
 
     #[test]
