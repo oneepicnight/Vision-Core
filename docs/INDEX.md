@@ -14,6 +14,8 @@ base. It does not define policy. Follow the linked controlling documents.
 | You need to classify a proposed change | [Consensus Boundaries](CONSENSUS_BOUNDARIES.md), then [Testing Policy](TESTING_POLICY.md) |
 | You need a recurring workflow | [Engineering Playbook](ENGINEERING_PLAYBOOK.md) |
 | You need the reason behind an accepted design | [Engineering Decision Records](DECISIONS/README.md) |
+| You need the current maturity assessment | [Current-State Assessment](VISION_CORE_CURRENT_STATE_ASSESSMENT.md) |
+| You are designing health or readiness | [Readiness and Health Model Design](READINESS_HEALTH_MODEL_DESIGN.md) |
 
 ## New Contributor Path
 
@@ -196,10 +198,12 @@ record.
 | Engineering constitution | [Engineering Manifest](VISION_ENGINEERING_MANIFEST.md) |
 | Reasons behind engineering practice | [Engineering Principles](ENGINEERING_PRINCIPLES.md) |
 | Current repository truth | [Current Status](CURRENT_STATUS.md) |
+| Current maturity, strengths, risks, and priorities | [Current-State Assessment](VISION_CORE_CURRENT_STATE_ASSESSMENT.md) |
 | Ecosystem and component map | [Architecture Overview](ARCHITECTURE_OVERVIEW.md) |
 | Implemented module detail | [Implemented Architecture](ARCHITECTURE.md) |
 | Current HTTP routes | [HTTP API](API.md) |
 | Current environment settings | [Configuration](CONFIGURATION.md) |
+| Future readiness and health design | [Readiness and Health Model Design](READINESS_HEALTH_MODEL_DESIGN.md) |
 | Protected protocol areas | [Consensus Boundaries](CONSENSUS_BOUNDARIES.md) |
 | Validation matrix and evidence | [Testing Policy](TESTING_POLICY.md) |
 | Complete release lifecycle | [Release Process](RELEASE_PROCESS.md) |
