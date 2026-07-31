@@ -438,7 +438,7 @@ async fn handle_inbound_with_runtime<S>(
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     let mut handshake_done = false;
-    let mut active_session: Option<(String, u64)> = None;
+    let mut active_session: Option<(String, u64, u64)> = None;
     let mut session_receiver: Option<mpsc::Receiver<P2PMessage>> = None;
     let mut requested_block_hash: Option<String> = None;
 
@@ -556,7 +556,10 @@ async fn handle_inbound_with_runtime<S>(
                                     }
                                 }
                                 let (generation, receiver) = sessions.register(peer_key.clone());
-                                active_session = Some((peer_key, generation));
+                                let peer_generation = peer_manager
+                                    .peer_generation(&peer_key)
+                                    .expect("accepted inbound peer should have a generation");
+                                active_session = Some((peer_key, generation, peer_generation));
                                 session_receiver = Some(receiver);
                             }
                             other => {
@@ -694,7 +697,7 @@ async fn handle_inbound_with_runtime<S>(
                         };
                         let peer_addr = active_session
                             .as_ref()
-                            .map(|(peer_addr, _)| peer_addr.clone())
+                            .map(|(peer_addr, _, _)| peer_addr.clone())
                             .unwrap_or_else(|| addr.to_string());
                         if sender
                             .send(InboundBlock { block, peer_addr })
@@ -706,7 +709,7 @@ async fn handle_inbound_with_runtime<S>(
                         }
                     }
                     P2PMessage::Height { summary } => {
-                        if let Some((peer_addr, _)) = active_session.as_ref() {
+                        if let Some((peer_addr, _, _)) = active_session.as_ref() {
                             peer_manager.note_peer_summary(peer_addr, summary, false);
                         }
                     }
@@ -734,8 +737,9 @@ async fn handle_inbound_with_runtime<S>(
         }
     }
 
-    if let Some((peer_addr, generation)) = active_session {
-        sessions.unregister(&peer_addr, generation);
+    if let Some((peer_addr, session_generation, peer_generation)) = active_session {
+        sessions.unregister(&peer_addr, session_generation);
+        peer_manager.disconnect_if_generation(&peer_addr, peer_generation);
     }
 }
 
@@ -991,13 +995,16 @@ mod tests {
             other => panic!("expected pong, got {:?}", other),
         }
 
+        assert_eq!(peer_manager.connected_count(), 1);
+        assert_eq!(peer_manager.best_remote_height(), 17);
+
         drop(client);
         timeout(Duration::from_secs(2), handle)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(peer_manager.connected_count(), 1);
-        assert_eq!(peer_manager.best_remote_height(), 17);
+        assert_eq!(peer_manager.connected_count(), 0);
+        assert_eq!(peer_manager.best_remote_height(), 0);
     }
 
     #[tokio::test]
@@ -1198,12 +1205,6 @@ mod tests {
         assert!(answered_server_get_height);
         assert!(saw_server_height);
 
-        drop(client);
-        timeout(Duration::from_secs(2), handle)
-            .await
-            .unwrap()
-            .unwrap();
-
         let key = "127.0.0.1:61129";
         let summary = peer_manager.peer_summary(key).unwrap();
         assert_eq!(summary.height, 134);
@@ -1230,6 +1231,14 @@ mod tests {
             peer.summary_source.as_deref(),
             Some(INBOUND_SUMMARY_REFRESH_SOURCE)
         );
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer_manager.connected_count(), 0);
+        assert_eq!(peer_manager.best_remote_height(), 0);
     }
     #[tokio::test]
     async fn inbound_handshake_rejects_wrong_chain_id() {

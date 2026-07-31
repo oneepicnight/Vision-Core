@@ -213,16 +213,24 @@ impl PeerManager {
             let disconnecting = matches!(state, PeerState::Disconnected | PeerState::KnownOnly);
             peer.state = state;
             if disconnecting {
-                peer.height = 0;
-                peer.tip_hash = None;
-                peer.cumulative_work = 0;
-                peer.last_height_updated_at = None;
-                peer.last_height_response_at = None;
-                peer.last_height_poll_sent_at = None;
-                peer.summary_generation = None;
-                peer.summary_source = None;
+                clear_peer_summary(peer);
             }
         }
+    }
+
+    /// Disconnect an inbound session only if it is still the newest session
+    /// for this durable peer identity.
+    pub(crate) fn disconnect_if_generation(&self, addr: &str, generation: u64) -> bool {
+        let mut peers = self.peers.write().unwrap();
+        let Some(peer) = peers.get_mut(addr) else {
+            return false;
+        };
+        if peer.connection_generation != generation {
+            return false;
+        }
+        peer.state = PeerState::Disconnected;
+        clear_peer_summary(peer);
+        true
     }
 
     /// Record a height received from a handshake.
@@ -481,6 +489,17 @@ impl PeerManager {
     }
 }
 
+fn clear_peer_summary(peer: &mut Peer) {
+    peer.height = 0;
+    peer.tip_hash = None;
+    peer.cumulative_work = 0;
+    peer.last_height_updated_at = None;
+    peer.last_height_response_at = None;
+    peer.last_height_poll_sent_at = None;
+    peer.summary_generation = None;
+    peer.summary_source = None;
+}
+
 impl Default for PeerManager {
     fn default() -> Self {
         Self::new()
@@ -570,6 +589,26 @@ mod tests {
             .unwrap();
         assert_eq!(first, second);
         assert_eq!(pm.peer_counts().durable_peers, 1);
+    }
+
+    #[test]
+    fn stale_inbound_disconnect_does_not_disconnect_newer_generation() {
+        let pm = PeerManager::new();
+        let hs = advertised_hs("127.0.0.1", 9001);
+        let key = pm
+            .resolve_inbound_peer_key("127.0.0.1:51000", &hs, true)
+            .unwrap();
+        let first_generation = pm.peer_generation(&key).unwrap();
+        pm.set_state(&key, PeerState::Connected);
+        pm.resolve_inbound_peer_key("127.0.0.1:51001", &hs, true)
+            .unwrap();
+        let second_generation = pm.peer_generation(&key).unwrap();
+        pm.set_state(&key, PeerState::Connected);
+
+        assert!(!pm.disconnect_if_generation(&key, first_generation));
+        assert_eq!(pm.connected_count(), 1);
+        assert!(pm.disconnect_if_generation(&key, second_generation));
+        assert_eq!(pm.connected_count(), 0);
     }
 
     #[test]
