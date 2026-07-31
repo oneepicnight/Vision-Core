@@ -51,7 +51,8 @@ async fn async_main() -> Result<()> {
         )
         .init();
 
-    let settings = Settings::from_env()?;
+    let mut settings = Settings::from_env()?;
+    node::services::resolve_auto_p2p_settings(&mut settings)?;
 
     print_banner(&settings);
 

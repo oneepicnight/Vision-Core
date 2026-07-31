@@ -61,11 +61,17 @@ pub struct Settings {
     /// P2P listen address.
     pub p2p_addr: String,
 
+    /// Whether startup should derive the P2P listen port from the routed IP.
+    pub p2p_auto_port: bool,
+
     /// Optional advertised P2P host/IP used as this node's durable peer identity.
     pub p2p_advertised_host: Option<String>,
 
     /// Optional advertised P2P port used as this node's durable peer identity.
     pub p2p_advertised_port: Option<u16>,
+
+    /// Whether the advertised port should use the resolved P2P listen port.
+    pub p2p_advertised_port_auto: bool,
 
     /// Whether loopback/private/link-local advertised peer addresses are accepted.
     pub allow_private_peer_addresses: bool,
@@ -109,7 +115,7 @@ impl fmt::Display for SettingsError {
             ),
             Self::InvalidAdvertisedPort { value } => write!(
                 formatter,
-                "invalid VISION_P2P_ADVERTISED_PORT value {value:?}: expected a nonzero port"
+                "invalid VISION_P2P_ADVERTISED_PORT value {value:?}: expected auto or a nonzero port"
             ),
             Self::AdvertisedHostWithoutPort { value } => write!(
                 formatter,
@@ -152,8 +158,9 @@ impl Settings {
     }
 
     fn from_raw(raw: RawSettings) -> Result<Self, SettingsError> {
-        let (p2p_advertised_host, p2p_advertised_port) =
+        let (p2p_advertised_host, p2p_advertised_port, p2p_advertised_port_auto) =
             parse_p2p_advertised_identity(raw.p2p_advertised_host, raw.p2p_advertised_port)?;
+        let (p2p_port, p2p_auto_port) = parse_p2p_port(raw.p2p_port);
 
         Ok(Self {
             data_dir: raw.data_dir.unwrap_or_else(|| "./data".into()),
@@ -163,14 +170,11 @@ impl Settings {
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(DEFAULT_HTTP_PORT)
             ),
-            p2p_addr: format!(
-                "0.0.0.0:{}",
-                raw.p2p_port
-                    .and_then(|p| p.parse::<u16>().ok())
-                    .unwrap_or(DEFAULT_P2P_PORT)
-            ),
+            p2p_addr: format!("0.0.0.0:{}", p2p_port),
+            p2p_auto_port,
             p2p_advertised_host,
             p2p_advertised_port,
+            p2p_advertised_port_auto,
             allow_private_peer_addresses: parse_explicit_bool(
                 "VISION_ALLOW_PRIVATE_PEERS",
                 raw.allow_private_peer_addresses,
@@ -188,6 +192,14 @@ impl Settings {
                 .unwrap_or(false),
             seed_peers: parse_seed_peers(raw.seed_peers)?,
         })
+    }
+}
+
+fn parse_p2p_port(raw: Option<String>) -> (u16, bool) {
+    match raw.as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("auto") => (0, true),
+        Some(value) => (value.parse::<u16>().unwrap_or(DEFAULT_P2P_PORT), false),
+        None => (DEFAULT_P2P_PORT, false),
     }
 }
 
@@ -230,9 +242,12 @@ fn parse_advertised_host(value: String) -> Result<String, SettingsError> {
     }
 }
 
-fn parse_advertised_port(value: String) -> Result<u16, SettingsError> {
+fn parse_advertised_port(value: String) -> Result<(Option<u16>, bool), SettingsError> {
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok((None, true));
+    }
     match value.parse::<u16>() {
-        Ok(port) if port > 0 => Ok(port),
+        Ok(port) if port > 0 => Ok((Some(port), false)),
         _ => Err(SettingsError::InvalidAdvertisedPort { value }),
     }
 }
@@ -240,13 +255,13 @@ fn parse_advertised_port(value: String) -> Result<u16, SettingsError> {
 fn parse_p2p_advertised_identity(
     host_raw: Option<String>,
     port_raw: Option<String>,
-) -> Result<(Option<String>, Option<u16>), SettingsError> {
+) -> Result<(Option<String>, Option<u16>, bool), SettingsError> {
     let host = host_raw.clone().map(parse_advertised_host).transpose()?;
-    let port = port_raw.clone().map(parse_advertised_port).transpose()?;
+    let parsed_port = port_raw.clone().map(parse_advertised_port).transpose()?;
 
-    match (host, port) {
-        (None, None) => Ok((None, None)),
-        (Some(host), Some(port)) => Ok((Some(host), Some(port))),
+    match (host, parsed_port) {
+        (None, None) => Ok((None, None, false)),
+        (Some(host), Some((port, auto))) => Ok((Some(host), port, auto)),
         (Some(_), None) => Err(SettingsError::AdvertisedHostWithoutPort {
             value: host_raw.expect("original advertised host should be present"),
         }),
@@ -488,8 +503,10 @@ mod tests {
         assert_eq!(settings.data_dir, "./data");
         assert_eq!(settings.http_addr, format!("0.0.0.0:{DEFAULT_HTTP_PORT}"));
         assert_eq!(settings.p2p_addr, format!("0.0.0.0:{DEFAULT_P2P_PORT}"));
+        assert!(!settings.p2p_auto_port);
         assert_eq!(settings.p2p_advertised_host, None);
         assert_eq!(settings.p2p_advertised_port, None);
+        assert!(!settings.p2p_advertised_port_auto);
         assert!(settings.allow_private_peer_addresses);
         assert_eq!(settings.miner_address, "0".repeat(64));
         assert!(!settings.mining_enabled);
@@ -502,6 +519,25 @@ mod tests {
                 .map(|peer| peer.to_string())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn p2p_auto_port_modes_are_explicit_and_typed() {
+        let settings = Settings::from_source(&TestSettingsSource::with_values(&[
+            ("VISION_P2P_PORT", "auto"),
+            ("VISION_P2P_ADVERTISED_HOST", "203.0.113.7"),
+            ("VISION_P2P_ADVERTISED_PORT", "AUTO"),
+        ]))
+        .expect("automatic P2P port settings should parse");
+
+        assert_eq!(settings.p2p_addr, "0.0.0.0:0");
+        assert!(settings.p2p_auto_port);
+        assert_eq!(
+            settings.p2p_advertised_host,
+            Some("203.0.113.7".to_string())
+        );
+        assert_eq!(settings.p2p_advertised_port, None);
+        assert!(settings.p2p_advertised_port_auto);
     }
 
     #[test]
@@ -582,7 +618,7 @@ mod tests {
             ),
             (
                 &[("VISION_P2P_ADVERTISED_HOST", "peer.example"), ("VISION_P2P_ADVERTISED_PORT", "0")][..],
-                "invalid VISION_P2P_ADVERTISED_PORT value \"0\": expected a nonzero port",
+                "invalid VISION_P2P_ADVERTISED_PORT value \"0\": expected auto or a nonzero port",
             ),
             (
                 &[("VISION_SEED_PEERS", "seed.example:7072")][..],

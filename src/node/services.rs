@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,52 @@ use crate::p2p::peer_manager::{validate_dial_address, PeerManager, PeerState};
 use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
 use crate::p2p::sync::SyncGuard;
 use crate::types::transaction::canonical_tx_id;
+
+const AUTO_P2P_PORT_MIN: u16 = 20_000;
+const AUTO_P2P_PORT_SPAN: u16 = 40_000;
+
+pub(crate) fn resolve_auto_p2p_settings(settings: &mut Settings) -> Result<()> {
+    let routed_ip = if settings.p2p_auto_port {
+        Some(detect_routed_local_ip()?)
+    } else {
+        None
+    };
+    resolve_auto_p2p_settings_for_ip(settings, routed_ip)
+}
+
+fn resolve_auto_p2p_settings_for_ip(
+    settings: &mut Settings,
+    routed_ip: Option<IpAddr>,
+) -> Result<()> {
+    let mut listen_addr: SocketAddr = settings.p2p_addr.parse()?;
+    if settings.p2p_auto_port {
+        let routed_ip = routed_ip
+            .ok_or_else(|| anyhow::anyhow!("automatic P2P port requires a routed local IP"))?;
+        listen_addr.set_port(auto_p2p_port_for_ip(routed_ip));
+        settings.p2p_addr = listen_addr.to_string();
+    }
+    if settings.p2p_advertised_port_auto {
+        settings.p2p_advertised_port = Some(listen_addr.port());
+    }
+    Ok(())
+}
+
+fn detect_routed_local_ip() -> Result<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
+    let ip = socket.local_addr()?.ip();
+    if ip.is_unspecified() || ip.is_loopback() {
+        anyhow::bail!("automatic P2P port could not determine a routed local IP");
+    }
+    Ok(ip)
+}
+
+fn auto_p2p_port_for_ip(ip: IpAddr) -> u16 {
+    let digest = blake3::hash(ip.to_string().as_bytes());
+    let offset =
+        u16::from_be_bytes([digest.as_bytes()[0], digest.as_bytes()[1]]) % AUTO_P2P_PORT_SPAN;
+    AUTO_P2P_PORT_MIN + offset
+}
 
 /// Spawn all background services for a running node.
 ///
@@ -824,8 +870,10 @@ mod tests {
             data_dir: "./data".to_string(),
             http_addr: "127.0.0.1:0".to_string(),
             p2p_addr: p2p_addr.to_string(),
+            p2p_auto_port: false,
             p2p_advertised_host: None,
             p2p_advertised_port: None,
+            p2p_advertised_port_auto: false,
             allow_private_peer_addresses: true,
             miner_address: "0".repeat(64),
             mining_enabled: false,
@@ -833,6 +881,34 @@ mod tests {
             alpha_airdrop_enabled: false,
             seed_peers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn automatic_p2p_port_is_stable_per_ip_and_uses_high_port_range() {
+        let first_ip: IpAddr = "192.168.1.20".parse().unwrap();
+        let second_ip: IpAddr = "192.168.1.21".parse().unwrap();
+        let first = auto_p2p_port_for_ip(first_ip);
+        let repeated = auto_p2p_port_for_ip(first_ip);
+        let second = auto_p2p_port_for_ip(second_ip);
+
+        assert_eq!(first, repeated);
+        assert!((AUTO_P2P_PORT_MIN..AUTO_P2P_PORT_MIN + AUTO_P2P_PORT_SPAN).contains(&first));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn automatic_advertised_port_uses_resolved_listen_port() {
+        let mut settings = test_settings("0.0.0.0:0".parse().unwrap());
+        settings.p2p_auto_port = true;
+        settings.p2p_advertised_host = Some("203.0.113.7".to_string());
+        settings.p2p_advertised_port_auto = true;
+
+        resolve_auto_p2p_settings_for_ip(&mut settings, Some("192.168.1.20".parse().unwrap()))
+            .unwrap();
+
+        let resolved: SocketAddr = settings.p2p_addr.parse().unwrap();
+        assert_ne!(resolved.port(), 0);
+        assert_eq!(settings.p2p_advertised_port, Some(resolved.port()));
     }
 
     async fn scripted_height_peer(height: u64) -> (tokio::io::DuplexStream, JoinHandle<()>) {
