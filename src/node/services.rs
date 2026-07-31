@@ -49,9 +49,16 @@ pub async fn start_services(
         let chain_ref = chain.clone();
         let mempool_ref = mempool.clone();
         let conn_mgr_ref = conn_mgr.clone();
+        let miner_manager_ref = miner_manager.clone();
         tokio::spawn(async move {
-            import_announced_blocks(inbound_block_receiver, chain_ref, mempool_ref, conn_mgr_ref)
-                .await;
+            import_announced_blocks(
+                inbound_block_receiver,
+                chain_ref,
+                mempool_ref,
+                conn_mgr_ref,
+                miner_manager_ref,
+            )
+            .await;
         });
     }
 
@@ -151,10 +158,15 @@ pub async fn start_services(
                     };
 
                     miner_manager.build_job(job.clone());
+                    let job_id = job.job_id;
+                    let miner_manager_ref = miner_manager.clone();
 
                     let mined = tokio::task::spawn_blocking(move || {
                         let mut nonce = 0u64;
                         loop {
+                            if !miner_manager_ref.is_current_job(job_id) {
+                                return None;
+                            }
                             if let Some(block) = job.try_nonce(nonce) {
                                 return Some(block);
                             }
@@ -222,6 +234,7 @@ async fn import_announced_blocks(
     chain: Arc<Mutex<ChainState>>,
     mempool: Arc<Mempool>,
     conn_mgr: Arc<P2PConnectionManager>,
+    miner_manager: Option<Arc<MinerManager>>,
 ) {
     while let Some(InboundBlock { block, peer_addr }) = receiver.recv().await {
         let block_hash = block.hash().to_string();
@@ -246,6 +259,9 @@ async fn import_announced_blocks(
 
         match result {
             AcceptResult::CanonExtension { height } => {
+                if let Some(miner_manager) = miner_manager.as_ref() {
+                    miner_manager.clear_job();
+                }
                 let recipients = conn_mgr.announce_block(&block, Some(&peer_addr));
                 tracing::info!(
                     "[P2P] accepted announced block height={} hash={} peer={} relayed_to={}",
@@ -846,6 +862,7 @@ mod tests {
             chain.clone(),
             Arc::new(Mempool::new()),
             conn_mgr,
+            None,
         ));
 
         let block = genesis_block();

@@ -40,6 +40,7 @@ pub struct MiningStats {
 /// Workers poll `current_job()` and abandon work when the job_id changes.
 pub struct MinerManager {
     inner: Arc<Mutex<MinerInner>>,
+    active_job_id: AtomicU64,
     params: VisionXParams,
 }
 
@@ -52,6 +53,7 @@ impl MinerManager {
                 blocks_found: 0,
                 start_time: Instant::now(),
             })),
+            active_job_id: AtomicU64::new(0),
             params,
         }
     }
@@ -74,6 +76,7 @@ impl MinerManager {
             job.header_template.number,
             job.target_difficulty
         );
+        self.active_job_id.store(job.job_id, Ordering::Release);
         inner.current_job = Some(job);
     }
 
@@ -82,7 +85,16 @@ impl MinerManager {
     /// Does NOT clear `last_built_epoch` — if the next job is in the same
     /// epoch, the dataset is not rebuilt.
     pub fn clear_job(&self) {
+        self.active_job_id.store(0, Ordering::Release);
         self.inner.lock().unwrap().current_job = None;
+    }
+
+    /// Return whether `job_id` is still the active canonical-tip job.
+    ///
+    /// Mining workers use this lock-free check to abandon stale work quickly
+    /// after a peer block advances or reorganizes the local canonical tip.
+    pub fn is_current_job(&self, job_id: u64) -> bool {
+        self.active_job_id.load(Ordering::Acquire) == job_id
     }
 
     /// Return a clone of the current job, or None if mining is paused.
@@ -226,10 +238,33 @@ mod tests {
         let job = m
             .build_candidate_for_tip(&g, &"11".repeat(32), vec![])
             .expect("should produce a job when chain has genesis");
+        let job_id = job.job_id;
         m.build_job(job);
         assert!(m.is_mining());
+        assert!(m.is_current_job(job_id));
         m.clear_job();
         assert!(!m.is_mining());
+        assert!(!m.is_current_job(job_id));
+    }
+
+    #[test]
+    fn publishing_a_new_job_invalidates_the_previous_job_id() {
+        let m = default_manager();
+        let g = seeded_state();
+        let first = m
+            .build_candidate_for_tip(&g, &"12".repeat(32), vec![])
+            .unwrap();
+        let first_id = first.job_id;
+        m.build_job(first);
+
+        let second = m
+            .build_candidate_for_tip(&g, &"12".repeat(32), vec![])
+            .unwrap();
+        let second_id = second.job_id;
+        m.build_job(second);
+
+        assert!(!m.is_current_job(first_id));
+        assert!(m.is_current_job(second_id));
     }
 
     #[test]
