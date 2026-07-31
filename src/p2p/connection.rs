@@ -127,9 +127,12 @@ impl P2PConnectionManager {
         self.local_node_nonce
     }
 
+    pub async fn bind_listener(&self) -> Result<TcpListener> {
+        Ok(TcpListener::bind(self.listen_addr).await?)
+    }
+
     /// Accept inbound connections in a loop, spawning one task per connection.
-    pub async fn run_listener(self: Arc<Self>) -> Result<()> {
-        let listener = TcpListener::bind(self.listen_addr).await?;
+    pub async fn run_listener(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         tracing::info!("[P2P] listening on {}", self.listen_addr);
 
         loop {

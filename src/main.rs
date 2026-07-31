@@ -90,9 +90,11 @@ async fn async_main() -> Result<()> {
     }
     let app = api::routes::api_router(api_state);
     let http_addr: std::net::SocketAddr = settings.http_addr.parse()?;
+    let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
     tracing::info!("[API] Listening on http://{}", http_addr);
+    tracing::info!("[NODE] All services started");
 
-    axum::serve(tokio::net::TcpListener::bind(http_addr).await?, app).await?;
+    axum::serve(http_listener, app).await?;
 
     Ok(())
 }
@@ -122,4 +124,122 @@ fn print_banner(settings: &Settings) {
         settings.data_dir,
     );
     tracing::info!("vision-core {} starting", NODE_VERSION);
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::async_main;
+    use std::net::TcpListener as StdTcpListener;
+    use std::process::{Command, Output};
+
+    const STARTUP_PROBE_SCENARIO: &str = "VISION_TEST_STARTUP_PROBE_SCENARIO";
+    const STARTUP_ENV_VARS: &[&str] = &[
+        "VISION_DATA_DIR",
+        "VISION_HTTP_PORT",
+        "VISION_P2P_PORT",
+        "VISION_P2P_ADVERTISED_HOST",
+        "VISION_P2P_ADVERTISED_PORT",
+        "VISION_ALLOW_PRIVATE_PEERS",
+        "VISION_MINER_ADDRESS",
+        "VISION_MINING",
+        "VISION_MINING_THREADS",
+        "VISION_ALPHA_AIRDROP_ENABLED",
+        "VISION_SEED_PEERS",
+    ];
+
+    fn run_startup_probe(scenario: &str, environment: &[(&str, String)]) -> Output {
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .arg("--exact")
+            .arg("startup_tests::startup_subprocess_probe")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(STARTUP_PROBE_SCENARIO, scenario);
+
+        for variable in STARTUP_ENV_VARS {
+            command.env_remove(variable);
+        }
+        for (variable, value) in environment {
+            command.env(variable, value);
+        }
+
+        command.output().expect("startup probe should start")
+    }
+
+    fn assert_probe_fails_without_started_log(scenario: &str, environment: &[(&str, String)]) {
+        let output = run_startup_probe(scenario, environment);
+        assert!(
+            !output.status.success(),
+            "startup probe {scenario:?} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output_text.contains("[NODE] All services started"),
+            "startup probe {scenario:?} reported the node as started\noutput:\n{output_text}"
+        );
+        assert!(
+            !output_text.contains("[API] Listening on http://"),
+            "startup probe {scenario:?} reported API readiness before bind succeeded\noutput:\n{output_text}"
+        );
+    }
+
+    #[test]
+    fn startup_rejects_occupied_p2p_listener_before_started_log() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let occupied_listener = StdTcpListener::bind(("0.0.0.0", 0)).expect("occupied port");
+        let occupied_port = occupied_listener.local_addr().unwrap().port();
+
+        assert_probe_fails_without_started_log(
+            "occupied_p2p_listener",
+            &[
+                ("VISION_DATA_DIR", data_dir.path().display().to_string()),
+                ("VISION_P2P_PORT", occupied_port.to_string()),
+                ("VISION_HTTP_PORT", "0".to_string()),
+                ("VISION_SEED_PEERS", String::new()),
+            ],
+        );
+    }
+
+    #[test]
+    fn startup_does_not_report_started_when_http_bind_fails() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let occupied_listener = StdTcpListener::bind(("0.0.0.0", 0)).expect("occupied port");
+        let occupied_port = occupied_listener.local_addr().unwrap().port();
+
+        assert_probe_fails_without_started_log(
+            "occupied_http_listener",
+            &[
+                ("VISION_DATA_DIR", data_dir.path().display().to_string()),
+                ("VISION_P2P_PORT", "0".to_string()),
+                ("VISION_HTTP_PORT", occupied_port.to_string()),
+                ("VISION_SEED_PEERS", String::new()),
+            ],
+        );
+    }
+
+    #[test]
+    fn startup_subprocess_probe() {
+        let Ok(_scenario) = std::env::var(STARTUP_PROBE_SCENARIO) else {
+            return;
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("probe runtime should build");
+
+        match runtime.block_on(async_main()) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("Fatal: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
 }

@@ -97,8 +97,9 @@ mod tests {
         ));
         let p2p_task = {
             let conn_mgr = conn_mgr.clone();
+            let listener = conn_mgr.bind_listener().await?;
             tokio::spawn(async move {
-                if let Err(e) = conn_mgr.run_listener().await {
+                if let Err(e) = conn_mgr.run_listener(listener).await {
                     tracing::warn!("[TEST-NODE] listener exited: {}", e);
                 }
             })

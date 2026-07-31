@@ -39,11 +39,12 @@ pub async fn start_services(
         settings.p2p_advertised_port,
         settings.allow_private_peer_addresses,
     ));
+    let listener = conn_mgr.bind_listener().await?;
 
     {
         let mgr = conn_mgr.clone();
         tokio::spawn(async move {
-            if let Err(e) = mgr.run_listener().await {
+            if let Err(e) = mgr.run_listener(listener).await {
                 tracing::error!("[P2P] Listener error: {}", e);
             }
         });
@@ -191,7 +192,6 @@ pub async fn start_services(
         }
     }
 
-    tracing::info!("[NODE] All services started");
     Ok(())
 }
 
@@ -514,8 +514,10 @@ fn unix_timestamp_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::settings::Settings;
     use crate::p2p::messages::P2PMessage;
     use crate::p2p::peer_manager::PeerState;
+    use std::net::TcpListener as StdTcpListener;
     use tokio::io::duplex;
     use tokio::task::JoinHandle;
 
@@ -526,6 +528,22 @@ mod tests {
 
     fn temp_peer_manager() -> Arc<PeerManager> {
         Arc::new(PeerManager::new())
+    }
+
+    fn test_settings(p2p_addr: SocketAddr) -> Settings {
+        Settings {
+            data_dir: "./data".to_string(),
+            http_addr: "127.0.0.1:0".to_string(),
+            p2p_addr: p2p_addr.to_string(),
+            p2p_advertised_host: None,
+            p2p_advertised_port: None,
+            allow_private_peer_addresses: true,
+            miner_address: "0".repeat(64),
+            mining_enabled: false,
+            mining_threads: 0,
+            alpha_airdrop_enabled: false,
+            seed_peers: Vec::new(),
+        }
     }
 
     async fn scripted_height_peer(height: u64) -> (tokio::io::DuplexStream, JoinHandle<()>) {
@@ -580,5 +598,27 @@ mod tests {
         let result = poll_peer_height(&mut client, peer_addr, &chain, &pm).await;
         assert!(result.is_err());
         assert_eq!(pm.best_remote_height(), 0);
+    }
+
+    #[tokio::test]
+    async fn start_services_fails_when_p2p_listener_bind_fails() {
+        let occupied_listener = StdTcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let occupied_addr = occupied_listener.local_addr().unwrap();
+        let settings = test_settings(occupied_addr);
+
+        let result = start_services(
+            temp_chain(),
+            temp_peer_manager(),
+            Arc::new(Mempool::new()),
+            None,
+            Arc::new(RecoveryState::new()),
+            &settings,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "occupied listener address should fail startup"
+        );
     }
 }
