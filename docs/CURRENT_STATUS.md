@@ -2,7 +2,7 @@
 
 ## Status Date
 
-2026-07-30, America/New_York.
+2026-07-31, America/New_York.
 
 This file distinguishes the immutable v1.0.4 release tag from the current
 authoritative `main` development baseline. They must not be conflated.
@@ -25,12 +25,14 @@ Historical tags remain immutable. `vision-core-consensus-v1.0.3` and `vision-cor
 - Current promoted code baseline:
   `b23ca0c53706c095acb0dd48b5ab5593166ac8ab`
 - Promoted code tree: `0bb6f9854972dab20babe5b4bccd67b6a24dbebd`
-- Current `origin/main`: `b23ca0c53706c095acb0dd48b5ab5593166ac8ab`
+- Current `origin/main`: `c9fad4626eabb352b3f54f6a82536f5a3c7f4067`
 
 Configuration Hardening review uses short-lived per-tranche branches. Tranche
 4B was reviewed through pull request #7 and promoted to `main` by normal
-fast-forward. The long-lived local and remote integration branches are
-synchronized with that promoted commit.
+fast-forward. A separate documentation-only closeout commit then advanced
+`main` to `c9fad4626eabb352b3f54f6a82536f5a3c7f4067` without changing source,
+tests, Cargo, dependencies, or CI. The long-lived local and remote
+integration branches are synchronized with that current `main` tip.
 
 ## Current Validation Baseline
 

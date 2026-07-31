@@ -8,20 +8,27 @@ Protocol foundations precede applications. Any item that changes consensus, pers
 
 ## Completed
 
-Status: completed on the current local Developer Readiness line; not yet
-promoted to the authoritative public branch.
+Status: completed and promoted to the authoritative public branch. Current
+documentation on `main` is maintained as a living record of that promoted
+state.
 
 - preserved historical proof-of-work and VisionX compatibility;
 - established cumulative-work fork choice and state-aware reorganization;
 - hardened snapshots, restart reconstruction, and persistence;
 - released `vision-core-consensus-v1.0.4` as an immutable authoritative baseline;
 - made the watchdog recovery regression deterministic;
+- completed the Developer Foundation documentation and governance stack;
 - aligned package and runtime release identity;
 - pinned the validated Rust toolchain;
 - documented architecture, API, configuration, contribution, security, and consensus policy;
+- completed the Formatting and Warning Baseline tranche;
 - established baseline CI and a clean formatting baseline;
+- completed the Dead-Code Classification tranche;
 - classified warning and dead-code debt;
 - completed owner-approved low-risk and ChainState cleanup tranches;
+- activated Configuration Hardening and promoted Tranches 1 through 4B,
+  including the typed settings seam, Tokio runtime-thread validation, and
+  explicit `VISION_DATA_DIR` startup validation;
 - created the Project Intelligence Layer and initial decision records.
 
 Completion here describes engineering work and recorded validation. Public authority changes only after review and promotion.
@@ -30,19 +37,26 @@ Completion here describes engineering work and recorded validation. Public autho
 
 ### Configuration Hardening
 
-Status: approved as the next engineering task, but gated.
+Status: active engineering phase. Tranches 1 through 4B are promoted; no later
+tranche is authorized yet.
 
-Configuration Hardening will replace silent fallback with explicit startup validation, reconcile `VISION_CONFIG`, resolve `VISION_MINING_THREADS`, validate mining configuration, clarify private-peer policy, and document operator migration.
+Configuration Hardening is the current operator-behavior hardening program.
+Promoted work has already added a typed settings seam, strict
+`TOKIO_WORKER_THREADS` validation, and explicit `VISION_DATA_DIR` validation
+before storage opens.
 
-Because this changes runtime startup behavior, work begins only after the
-Developer Readiness stack is reviewed, pushed, and promoted.
+Remaining approved direction includes replacing other silent fallback with
+explicit startup validation, reconciling `VISION_CONFIG`, resolving
+`VISION_MINING_THREADS`, validating mining configuration, clarifying
+private-peer policy, and documenting operator migration. Each later behavior
+change still requires its own authorization, validation, review branch,
+pull-request CI, and promotion gate.
 
 ### Repository polish
 
-Status: current documentation and governance work.
+Status: ongoing maintenance alongside Configuration Hardening.
 
-- review and promote the Project Intelligence Layer;
-- resolve documentation discrepancies discovered during review;
+- keep current-state and roadmap documentation synchronized with promoted work;
 - keep warning and dead-code classifications current;
 - preserve one-concern-per-commit history;
 - avoid any new cleanup beyond explicit authorization;
