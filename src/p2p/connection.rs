@@ -695,6 +695,65 @@ mod tests {
         assert_eq!(peer_manager.connected_count(), 1);
         assert_eq!(peer_manager.best_remote_height(), 17);
     }
+
+    #[tokio::test]
+    async fn inbound_announcements_and_blocks_do_not_change_chain_without_sync() {
+        let addr: SocketAddr = "127.0.0.1:19008".parse().unwrap();
+        let local_nonce = local_nonce_for(addr);
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let (server, mut client) = duplex(64 * 1024);
+        let handle = tokio::spawn(handle_inbound(
+            server,
+            addr,
+            chain.clone(),
+            peer_manager,
+            local_nonce,
+            None,
+            None,
+            true,
+        ));
+
+        let remote = HandshakeMessage::new(0, local_nonce + 1);
+        send_message(&mut client, &P2PMessage::Handshake(remote))
+            .await
+            .unwrap();
+        let reply = recv_message(&mut client).await.unwrap();
+        accepted_handshake_response(reply, local_nonce);
+
+        let block = genesis_block();
+        let block_hash = block.hash().to_string();
+        let announcement = AnnounceBlock {
+            height: block.header.number,
+            hash: block_hash.clone(),
+            prev: block.header.parent_hash.clone(),
+        };
+        send_message(&mut client, &P2PMessage::AnnounceBlock(announcement))
+            .await
+            .unwrap();
+        send_message(&mut client, &P2PMessage::Block { block })
+            .await
+            .unwrap();
+
+        // Ping/Pong provides a deterministic barrier proving the inbound loop
+        // consumed both preceding messages before the chain is inspected.
+        send_message(&mut client, &P2PMessage::Ping { timestamp: 43 })
+            .await
+            .unwrap();
+        assert!(matches!(
+            recv_message(&mut client).await.unwrap(),
+            P2PMessage::Pong { timestamp: 43 }
+        ));
+
+        assert!(chain.lock().await.block_by_hash(&block_hash).is_none());
+
+        drop(client);
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn inbound_advertised_peer_refreshes_full_summary_on_active_stream() {
         let addr: SocketAddr = "127.0.0.1:19009".parse().unwrap();
