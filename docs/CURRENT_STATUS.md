@@ -218,6 +218,13 @@ startup sequencing hardening are promoted. Vision-Core has moved from broad
 repository modernization into targeted operational hardening. This status does
 not classify Vision-Core as generally production-ready.
 
+The readiness and health-state policy is approved in
+[ADR-0009](DECISIONS/0009_readiness_health_state_policy.md) and formalized in
+[READINESS_HEALTH_MODEL_DESIGN.md](READINESS_HEALTH_MODEL_DESIGN.md). It defines
+role-aware liveness, readiness, degradation, versioned operational surfaces,
+and diagnostic retention/redaction. It authorizes design only; no typed model,
+route, setting, or runtime behavior has been implemented by that approval.
+
 Its intended scope includes:
 
 - replacing silent parsing fallback with typed, actionable validation;

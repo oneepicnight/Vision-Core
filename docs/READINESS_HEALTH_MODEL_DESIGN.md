@@ -2,7 +2,10 @@
 
 ## Status and scope
 
-This document is a design brief only. It does not authorize or implement a
+This document is the approved policy basis and design brief for future
+readiness and health-state work. The policy choices are recorded in
+[ADR-0009](DECISIONS/0009_readiness_health_state_policy.md). It does not
+authorize or implement a
 status model, HTTP route, logging change, service-lifecycle change, persistence
 change, or Desktop integration.
 
@@ -16,7 +19,25 @@ Any future model must describe operational state only. It must not affect
 consensus, protocol versions, wire formats, persistence formats, chain validity,
 or mining rules.
 
-## State vocabulary
+## Approved component-state vocabulary
+
+Every component uses the fixed machine-readable vocabulary below. A separate
+stable reason code explains the state, and a human-readable explanation may
+provide non-contractual operator context.
+
+| State | Meaning |
+| --- | --- |
+| `starting` | The component has begun initialization but has not reached a usable conclusion. |
+| `ready` | The component can perform the capability required by the selected node role. |
+| `degraded` | The component remains usable but a non-role-critical capability is impaired or lacks external confirmation. |
+| `not_ready` | The component cannot currently perform a capability required by the selected node role. |
+| `failed` | The component encountered a terminal or exhausted failure under its applicable policy. |
+| `disabled` | The component is intentionally not enabled for the selected node role. |
+
+State strings and stable reason codes are API data. Human-readable
+explanations must not be used for control flow.
+
+## Observable startup facts
 
 The model must be able to distinguish these observations without collapsing
 them into one Boolean:
@@ -29,7 +50,7 @@ them into one Boolean:
 | Chain state recovered | Genesis identity, snapshot/replay, indexes, cumulative work, and canonical state completed sufficiently for local use. |
 | HTTP listener bound | The configured HTTP socket is reserved and ready to serve. |
 | P2P listener bound | The configured P2P socket is reserved and the listener task can accept connections. |
-| Seed dialing started | Outbound attempts for configured seeds have been scheduled or begun. |
+| Seed dialing started | At least one outbound connection attempt has begun. Scheduling work without beginning an attempt is insufficient. |
 | Peer count zero | No compatible peers are currently connected; this is not by itself a fatal local-startup failure. |
 | Peers connected | At least one compatible peer session is active. |
 | Synchronization idle | No synchronization operation is active; this may mean caught up, no target, or waiting to retry and therefore needs a reason. |
@@ -64,11 +85,18 @@ requires:
 - chain state loaded or recovered successfully;
 - required local listeners bound successfully.
 
-Reachable seeds and connected peers should not be required by default. A node
-can be intentionally isolated, temporarily offline, or waiting for peer
-discovery while its local chain and services remain usable. Network condition
-belongs in a separate dimension and may make the overall presentation
-degraded.
+Reachable seeds and connected peers are not required by default. Seed dialing
+must begin before readiness is evaluated when applicable, but successful
+connection is not required. A normal networked node with zero peers becomes
+degraded after its configured grace period and remains degraded indefinitely
+rather than terminating. A role-critical impairment returns `not_ready` even
+when the process remains live.
+
+Intentional isolation and inbound-only operation are separate, explicit node
+modes. An explicitly isolated node can be ready with zero peers when its
+required local services are healthy. Inbound-only mode disables outbound seed
+dialing while retaining its separately configured inbound listener behavior.
+An empty seed list alone does not imply either mode.
 
 The current startup order creates an API-observation question: HTTP is one of
 the required listeners, yet `/ready` can only be queried after it binds. The
@@ -97,6 +125,15 @@ reachability. Proposed fields include:
 Advertised peer work remains discovery information, never authority. Network
 readiness must not bypass local validation or describe a peer-advertised chain
 as accepted.
+
+Public-node mode is explicit. It requires a complete, syntactically valid
+advertised host and port. A private or loopback advertised address requires an
+explicit override. The node validates configured intent and identity syntax;
+it does not claim that the advertised identity is externally reachable.
+
+Malformed seed addresses remain configuration errors. Syntactically valid but
+unreachable seeds are runtime network conditions. Their failure does not abort
+startup; it contributes to degradation after the zero-peer grace period.
 
 ## Chain readiness
 
@@ -131,13 +168,18 @@ Mining readiness is an independent dimension. Proposed fields include:
 - pause or degradation reason;
 - blocks found and other already supported statistics.
 
-Mining disabled is a normal node mode. Mining failure should not make a
-non-mining node generally unready. The treatment of failure after mining is
-explicitly enabled remains an owner policy decision.
+Mining disabled is a normal node mode. Invalid mining configuration and mining
+initialization failure are fatal when the selected node role explicitly
+requires mining. A mining worker failure after successful startup marks the
+mining component failed and applies a bounded retry policy. While mining is
+optional, the top-level node is degraded. While mining is required by the
+declared role, the top-level node is not ready and `/api/v1/ready` returns HTTP
+503. After the retry limit is exhausted, that state remains visible; the
+process does not terminate automatically.
 
 ## Degraded operation
 
-Degraded means critical local services remain usable but an operational
+Degraded means the node can still perform its declared role while an operational
 capability is impaired or lacks external confirmation. Candidate degraded
 conditions include:
 
@@ -153,6 +195,30 @@ conditions include:
 Degradation should contain typed reasons, timestamps, first/last occurrence,
 and bounded diagnostic context. Multiple reasons should be representable
 without relying on log-message parsing.
+
+Degradation is not a way to hide role-critical failure. If an impairment
+prevents the selected role from operating, top-level readiness is
+`not_ready` and the readiness endpoint returns HTTP 503 even though liveness
+may continue to return HTTP 200.
+
+## Explicit operating modes
+
+Readiness is evaluated against an explicit declared role and its modes:
+
+- a normal networked node may be degraded with zero peers after its grace
+  period but remains alive;
+- an isolated node intentionally requires no inbound or outbound peer
+  connectivity and can be ready with zero peers;
+- inbound-only operation is distinct from isolation and retains inbound
+  networking while disabling outbound seed dialing;
+- public-node mode requires a complete advertised identity but does not claim
+  external reachability;
+- a mining-required role treats mining initialization as startup-critical and
+  later exhausted mining failure as role-critical.
+
+The implementation design must define role composition explicitly. It must not
+infer operator intent from peer count, an empty seed list, or a missing
+advertised identity.
 
 ## Fatal startup failures
 
@@ -190,10 +256,11 @@ NodeOperationalStatus
   observed_at: monotonic/wall-clock metadata as appropriate
 ```
 
-Possible lifecycle states are `Launching`, `LoadingConfiguration`,
-`OpeningStorage`, `RecoveringChain`, `BindingServices`, `Ready`, `Degraded`,
-and `Stopping`. Fatal failure is better represented as a typed terminal reason
-returned from startup than as a long-lived in-process state.
+Lifecycle phases may retain internal detail such as launching, loading
+configuration, opening storage, recovering chain, binding services, and
+stopping. Every externally reported component conclusion maps to the approved
+fixed vocabulary. Fatal failure is better represented as a typed terminal
+reason returned from startup than as a long-lived in-process state.
 
 The model should use snapshots or atomics appropriate to each field, avoid
 holding consensus/state locks across HTTP serialization, and keep operational
@@ -216,17 +283,54 @@ versioning policy exists. New `/health` and `/ready` endpoints avoid overloading
 the existing snapshot, but route addition and response schemas still require
 separate authorization and contract tests.
 
-Recommended semantics:
+Approved semantics:
 
 | Endpoint | Success criterion | Must not require |
 | --- | --- | --- |
-| `/health` | HTTP process can respond | peers, sync, mining, chain freshness |
-| `/ready` | configuration, storage/recovery, and required local listeners succeeded | reachable seeds, nonzero peers, mining |
-| `/status` | always returns the best detailed snapshot once API serving is available | a healthy or ready conclusion |
+| `/api/v1/health` | HTTP process can respond; returns HTTP 200 while responsive, including degraded operation | peers, sync, mining, chain freshness |
+| `/api/v1/ready` | selected node role is operable; returns HTTP 200 for ready or non-role-critical degradation and HTTP 503 while starting or role-critically impaired | successful seed connection or nonzero peers unless the selected role explicitly requires them |
+| `/api/v1/status` | returns HTTP 200 with the best detailed snapshot once API serving is available | a healthy or ready conclusion |
 
-The HTTP status-code policy, response versioning, authentication exposure, and
-whether degraded readiness returns success or a non-2xx code are owner/API
-decisions.
+The new surfaces begin at API version `v1` and include an explicit schema
+version. Within `v1`, fields may be added, but existing fields or meanings may
+not be removed or changed. Consumers must tolerate unknown fields. Existing
+unversioned routes are not changed or stabilized by this design.
+
+## Policy parameters and defaults
+
+The following are named configuration/default decisions. Implementations must
+not hide them as incidental numeric constants:
+
+| Policy parameter | Requirement |
+| --- | --- |
+| `zero_peer_grace_period` | A documented duration applied before a normal networked zero-peer node becomes degraded. The implementation tranche must propose and test the concrete default. |
+| `mining_retry_limit` | A documented bounded count governing worker recovery attempts before mining becomes failed. The implementation tranche must propose and test the concrete default. |
+| `transition_history_capacity` | A bounded in-memory transition count. The approved initial default is 100 entries. |
+
+Public configuration names, units, bounds, and migration behavior must be
+reviewed with the implementation that introduces them. The approved policy
+requires explicit ownership and defaults; it does not authorize settings or
+choose undocumented environment-variable names.
+
+## Diagnostic retention and redaction
+
+Readiness transitions are retained in a bounded in-memory history and reset on
+process restart. They are never stored in the chain database. Structured logs
+are the durable integration surface, with retention controlled by the
+operator's logging system.
+
+Diagnostic output follows these rules:
+
+- configuration values and unknown diagnostic fields are sensitive by
+  default;
+- only explicitly allowlisted non-secret values may be emitted;
+- full filesystem paths may appear in local logs but are redacted from
+  unauthenticated API responses;
+- full peer addresses may appear in local logs but public status responses use
+  aggregate or redacted forms;
+- rejected values are echoed only for explicitly non-sensitive settings;
+- diagnostics identify sensitive setting names and validation rules without
+  echoing their values.
 
 ## Desktop implications
 
@@ -262,26 +366,13 @@ The design and any future implementation must not change:
 Operational status is derived observation. It must never become an alternate
 consensus input or persisted source of chain truth.
 
-## Policy decisions required
+## Policy status
 
-The following require owner review before implementation:
-
-1. Whether zero peers after startup is `Ready` with a degraded network state or
-   changes the top-level result to `Degraded`.
-2. Whether seed dialing begins before readiness is announced, provided dialing
-   success remains non-blocking.
-3. Whether API readiness always requires P2P listener success for every
-   supported node mode.
-4. Whether the HTTP listener itself is a readiness prerequisite or only the
-   mechanism used to expose a previously completed local readiness state.
-5. How intentionally isolated nodes declare that zero peers is expected.
-6. Whether advertised identity is required for a node to claim public-network
-   readiness while remaining optional for local or outbound-only modes.
-7. Whether mining failures degrade only mining or the full node when mining was
-   explicitly enabled.
-8. Whether degraded `/ready` responses use success or non-success HTTP status.
-9. Which status fields and error codes become versioned API contracts.
-10. Retention, privacy, and redaction policy for last peer/seed errors.
+The owner approved the readiness and health-state policy represented by this
+document. No owner policy decisions remain outstanding within this design
+sheet. Concrete implementation details such as public setting names and the
+numeric defaults called out above remain review inputs for their respective
+tranches, not permission to implement them.
 
 ## Proposed implementation tranches
 

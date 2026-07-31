@@ -156,8 +156,9 @@ Status: planned architecture; designs and interfaces are not yet approved protoc
 
 ### Node usability
 
-- design and add separately observable liveness, startup readiness, network
-  readiness, chain readiness, mining readiness, and degraded operation;
+- implement the approved design for separately observable liveness, startup
+  readiness, network readiness, chain readiness, mining readiness, and degraded
+  operation through independently authorized tranches;
 - improve peer and synchronization visibility;
 - produce safe backup, restore, and upgrade flows;
 - define deployment profiles and resource guidance.

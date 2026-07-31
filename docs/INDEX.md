@@ -229,6 +229,7 @@ record.
 | [0006](DECISIONS/0006_state_root_and_persistence_integrity.md) | Treat state root, persistence, and restart as one integrity boundary |
 | [0007](DECISIONS/0007_deterministic_watchdog_testing.md) | Control watchdog test order without changing production peer behavior |
 | [0008](DECISIONS/0008_developer_quality_baseline.md) | Perform Developer Readiness work through classified, narrow tranches |
+| [0009](DECISIONS/0009_readiness_health_state_policy.md) | Define role-aware liveness, readiness, degradation, API, and diagnostic policy |
 
 ## Phase I Boundary
 

@@ -112,8 +112,8 @@ validity, or mining rules.
 
 ## Current risks and gaps
 
-- Readiness, health, lifecycle, degradation, and fatal-state reporting are not
-  formalized.
+- Readiness, health, lifecycle, degradation, and fatal-state policy is now
+  formally defined, but no typed runtime model or endpoint implements it.
 - Seed connection diagnostics remain separate from listener readiness and are
   not exposed through a stable operational status contract.
 - Mining configuration policy remains unresolved, including miner identity and
@@ -132,9 +132,10 @@ validity, or mining rules.
 
 These priorities are recommendations, not implementation authorization.
 
-1. **Readiness and health-state design.** Define local startup readiness,
-   liveness, detailed status, degradation, and fatal failure before adding
-   endpoints or more lifecycle logs.
+1. **Internal readiness model characterization.** Starting from the approved
+   readiness and health-state policy, characterize current lifecycle boundaries
+   and propose the first private typed model without adding endpoints or
+   changing runtime behavior.
 2. **Seed-connection diagnostics and status reporting.** Record configured
    seeds, dialing state, successful connections, last errors, peer freshness,
    and sync-target availability without making external reachability a local
@@ -158,6 +159,7 @@ boundaries. Its next maturity constraint is operational truth: the software
 needs a typed, observable distinction between alive, locally ready,
 network-connected, synchronized, degraded, mining, and fatally failed states.
 
-The project is ready for a separately authorized readiness-design review and
-subsequent narrow implementation tranches. It is not yet a complete operator
+The readiness-design policy is approved. The project is ready for separately
+authorized, narrow characterization and implementation tranches; the design
+itself authorizes no runtime change. Vision-Core is not yet a complete operator
 platform, closed-alpha package, or public-user product.

@@ -19,5 +19,6 @@ Decision records capture durable choices that future maintainers must understand
 6. [State-Root and Persistence Integrity](0006_state_root_and_persistence_integrity.md)
 7. [Deterministic Watchdog Testing](0007_deterministic_watchdog_testing.md)
 8. [Developer Quality Baseline](0008_developer_quality_baseline.md)
+9. [Readiness and Health-State Policy](0009_readiness_health_state_policy.md)
 
 New records use the next four-digit number and a descriptive snake-case filename. Accepted records are not rewritten to conceal earlier reasoning; material reversals require a superseding record.
