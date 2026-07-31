@@ -1,22 +1,92 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::chain::state::ChainState;
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
 use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeMessage, HandshakeResult};
+use crate::types::Block;
 
 /// Maximum wire message size: 16 MiB.
 ///
 /// Messages larger than this are rejected before reading the body to prevent
 /// memory exhaustion attacks from malicious peers.
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
+
+/// Maximum number of locally generated messages waiting on one peer session.
+///
+/// Block announcements are advisory: a peer that cannot keep up will discover
+/// the current tip through the existing height/synchronization path instead of
+/// growing an unbounded in-memory queue.
+const SESSION_OUTBOUND_CAPACITY: usize = 32;
+
+#[derive(Debug)]
+pub(crate) struct InboundBlock {
+    pub block: Block,
+    pub peer_addr: String,
+}
+
+struct SessionSender {
+    generation: u64,
+    sender: mpsc::Sender<P2PMessage>,
+}
+
+pub(crate) struct PeerSessionRegistry {
+    next_generation: AtomicU64,
+    sessions: std::sync::Mutex<HashMap<String, SessionSender>>,
+}
+
+impl PeerSessionRegistry {
+    fn new() -> Self {
+        Self {
+            next_generation: AtomicU64::new(1),
+            sessions: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn register(&self, peer_addr: String) -> (u64, mpsc::Receiver<P2PMessage>) {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(peer_addr, SessionSender { generation, sender });
+        (generation, receiver)
+    }
+
+    pub(crate) fn unregister(&self, peer_addr: &str, generation: u64) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions
+            .get(peer_addr)
+            .is_some_and(|session| session.generation == generation)
+        {
+            sessions.remove(peer_addr);
+        }
+    }
+
+    fn announce_block(&self, block: &Block, exclude_peer: Option<&str>) -> usize {
+        let announcement = crate::p2p::protocol::AnnounceBlock {
+            height: block.header.number,
+            hash: block.hash().to_string(),
+            prev: block.header.parent_hash.clone(),
+        };
+        let message = P2PMessage::AnnounceBlock(announcement);
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .iter()
+            .filter(|(peer_addr, _)| exclude_peer != Some(peer_addr.as_str()))
+            .filter(|(_, session)| session.sender.try_send(message.clone()).is_ok())
+            .count()
+    }
+}
 
 // --- Wire framing -----------------------------------------------------------
 //
@@ -78,6 +148,8 @@ pub struct P2PConnectionManager {
     advertised_ip: Option<String>,
     advertised_port: Option<u16>,
     allow_private_peer_addresses: bool,
+    sessions: Arc<PeerSessionRegistry>,
+    inbound_blocks: Option<mpsc::Sender<InboundBlock>>,
 }
 
 impl P2PConnectionManager {
@@ -95,6 +167,8 @@ impl P2PConnectionManager {
             advertised_ip: None,
             advertised_port: None,
             allow_private_peer_addresses: true,
+            sessions: Arc::new(PeerSessionRegistry::new()),
+            inbound_blocks: None,
         }
     }
 
@@ -111,6 +185,33 @@ impl P2PConnectionManager {
         manager.advertised_port = advertised_port;
         manager.allow_private_peer_addresses = allow_private_peer_addresses;
         manager
+    }
+
+    pub(crate) fn with_block_receiver(
+        mut self,
+        inbound_blocks: mpsc::Sender<InboundBlock>,
+    ) -> Self {
+        self.inbound_blocks = Some(inbound_blocks);
+        self
+    }
+
+    pub(crate) fn sessions(&self) -> Arc<PeerSessionRegistry> {
+        self.sessions.clone()
+    }
+
+    pub(crate) fn announce_block(&self, block: &Block, exclude_peer: Option<&str>) -> usize {
+        self.sessions.announce_block(block, exclude_peer)
+    }
+
+    pub(crate) async fn queue_inbound_block(&self, block: Block, peer_addr: String) -> Result<()> {
+        let sender = self
+            .inbound_blocks
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("inbound block importer is unavailable"))?;
+        sender
+            .send(InboundBlock { block, peer_addr })
+            .await
+            .map_err(|_| anyhow::anyhow!("inbound block importer is unavailable"))
     }
 
     pub(crate) fn local_handshake(&self, chain_height: u64) -> HandshakeMessage {
@@ -145,8 +246,10 @@ impl P2PConnectionManager {
                     let advertised_ip = self.advertised_ip.clone();
                     let advertised_port = self.advertised_port;
                     let allow_private = self.allow_private_peer_addresses;
+                    let sessions = self.sessions.clone();
+                    let inbound_blocks = self.inbound_blocks.clone();
                     tokio::spawn(async move {
-                        handle_inbound(
+                        handle_inbound_with_runtime(
                             stream,
                             addr,
                             chain,
@@ -155,6 +258,8 @@ impl P2PConnectionManager {
                             advertised_ip,
                             advertised_port,
                             allow_private,
+                            sessions,
+                            inbound_blocks,
                         )
                         .await;
                     });
@@ -273,7 +378,7 @@ fn handshake_reject_reason(result: &HandshakeResult) -> String {
 ///
 /// Reads messages in a loop, logging each one by its label. The connection
 /// must complete a valid handshake before any other message is accepted.
-async fn handle_inbound<S>(
+async fn handle_inbound_with_runtime<S>(
     mut stream: S,
     addr: SocketAddr,
     chain: Arc<Mutex<ChainState>>,
@@ -282,13 +387,36 @@ async fn handle_inbound<S>(
     advertised_ip: Option<String>,
     advertised_port: Option<u16>,
     allow_private_peer_addresses: bool,
+    sessions: Arc<PeerSessionRegistry>,
+    inbound_blocks: Option<mpsc::Sender<InboundBlock>>,
 ) where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     let mut handshake_done = false;
+    let mut active_session: Option<(String, u64)> = None;
+    let mut session_receiver: Option<mpsc::Receiver<P2PMessage>> = None;
+    let mut requested_block_hash: Option<String> = None;
 
     loop {
-        match recv_message(&mut stream).await {
+        let incoming = if let Some(receiver) = session_receiver.as_mut() {
+            tokio::select! {
+                incoming = recv_message(&mut stream) => incoming,
+                outbound = receiver.recv() => {
+                    let Some(outbound) = outbound else {
+                        break;
+                    };
+                    if let Err(error) = send_message(&mut stream, &outbound).await {
+                        tracing::debug!("[P2P] {} outbound session send error: {}", addr, error);
+                        break;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            recv_message(&mut stream).await
+        };
+
+        match incoming {
             Ok(msg) => {
                 if !handshake_done && !msg.is_pre_handshake() {
                     tracing::warn!(
@@ -374,6 +502,9 @@ async fn handle_inbound<S>(
                                         }
                                     }
                                 }
+                                let (generation, receiver) = sessions.register(peer_key.clone());
+                                active_session = Some((peer_key, generation));
+                                session_receiver = Some(receiver);
                             }
                             other => {
                                 peer_manager.upsert(&addr.to_string(), false);
@@ -446,6 +577,86 @@ async fn handle_inbound<S>(
                             }
                         }
                     }
+                    P2PMessage::AnnounceBlock(announcement) => {
+                        if !handshake_done {
+                            tracing::warn!("[P2P] {} announced a block before handshake", addr);
+                            break;
+                        }
+                        if !is_canonical_hash(&announcement.hash)
+                            || !is_canonical_hash(&announcement.prev)
+                        {
+                            tracing::warn!("[P2P] {} sent malformed block announcement", addr);
+                            break;
+                        }
+                        let known = chain
+                            .lock()
+                            .await
+                            .block_by_hash(&announcement.hash)
+                            .is_some();
+                        if !known && requested_block_hash.is_none() {
+                            requested_block_hash = Some(announcement.hash.clone());
+                            if let Err(error) = send_message(
+                                &mut stream,
+                                &P2PMessage::GetBlock {
+                                    hash: announcement.hash,
+                                },
+                            )
+                            .await
+                            {
+                                tracing::debug!(
+                                    "[P2P] {} announced-block request failed: {}",
+                                    addr,
+                                    error
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    P2PMessage::Block { block } => {
+                        if !handshake_done {
+                            tracing::warn!("[P2P] {} sent a block before handshake", addr);
+                            break;
+                        }
+                        let Some(expected_hash) = requested_block_hash.take() else {
+                            tracing::warn!("[P2P] {} sent an unrequested block", addr);
+                            break;
+                        };
+                        let actual_hash = block.hash().to_string();
+                        if actual_hash != expected_hash {
+                            tracing::warn!(
+                                "[P2P] {} returned block {} for request {}",
+                                addr,
+                                actual_hash,
+                                expected_hash
+                            );
+                            break;
+                        }
+                        let Some(sender) = inbound_blocks.as_ref() else {
+                            tracing::debug!(
+                                "[P2P] {} block {} ignored without runtime importer",
+                                addr,
+                                actual_hash
+                            );
+                            continue;
+                        };
+                        let peer_addr = active_session
+                            .as_ref()
+                            .map(|(peer_addr, _)| peer_addr.clone())
+                            .unwrap_or_else(|| addr.to_string());
+                        if sender
+                            .send(InboundBlock { block, peer_addr })
+                            .await
+                            .is_err()
+                        {
+                            tracing::error!("[P2P] inbound block importer is unavailable");
+                            break;
+                        }
+                    }
+                    P2PMessage::Height { summary } => {
+                        if let Some((peer_addr, _)) = active_session.as_ref() {
+                            peer_manager.note_peer_summary(peer_addr, summary, false);
+                        }
+                    }
                     P2PMessage::Disconnect { reason } => {
                         tracing::debug!("[P2P] {} disconnected: {}", addr, reason);
                         break;
@@ -469,6 +680,45 @@ async fn handle_inbound<S>(
             }
         }
     }
+
+    if let Some((peer_addr, generation)) = active_session {
+        sessions.unregister(&peer_addr, generation);
+    }
+}
+
+#[cfg(test)]
+async fn handle_inbound<S>(
+    stream: S,
+    addr: SocketAddr,
+    chain: Arc<Mutex<ChainState>>,
+    peer_manager: Arc<PeerManager>,
+    local_node_nonce: u64,
+    advertised_ip: Option<String>,
+    advertised_port: Option<u16>,
+    allow_private_peer_addresses: bool,
+) where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    handle_inbound_with_runtime(
+        stream,
+        addr,
+        chain,
+        peer_manager,
+        local_node_nonce,
+        advertised_ip,
+        advertised_port,
+        allow_private_peer_addresses,
+        Arc::new(PeerSessionRegistry::new()),
+        None,
+    )
+    .await;
+}
+
+fn is_canonical_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 // --- Tests -----------------------------------------------------------------
@@ -697,13 +947,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_announcements_and_blocks_do_not_change_chain_without_sync() {
+    async fn inbound_announcements_request_blocks_for_unified_import() {
         let addr: SocketAddr = "127.0.0.1:19008".parse().unwrap();
         let local_nonce = local_nonce_for(addr);
         let chain = temp_chain();
         let peer_manager = temp_peer_manager();
+        let (block_sender, mut block_receiver) = mpsc::channel(1);
         let (server, mut client) = duplex(64 * 1024);
-        let handle = tokio::spawn(handle_inbound(
+        let handle = tokio::spawn(handle_inbound_with_runtime(
             server,
             addr,
             chain.clone(),
@@ -712,6 +963,8 @@ mod tests {
             None,
             None,
             true,
+            Arc::new(PeerSessionRegistry::new()),
+            Some(block_sender),
         ));
 
         let remote = HandshakeMessage::new(0, local_nonce + 1);
@@ -731,21 +984,20 @@ mod tests {
         send_message(&mut client, &P2PMessage::AnnounceBlock(announcement))
             .await
             .unwrap();
+        match recv_message(&mut client).await.unwrap() {
+            P2PMessage::GetBlock { hash } => assert_eq!(hash, block_hash),
+            other => panic!("expected block request, got {:?}", other),
+        }
         send_message(&mut client, &P2PMessage::Block { block })
             .await
             .unwrap();
 
-        // Ping/Pong provides a deterministic barrier proving the inbound loop
-        // consumed both preceding messages before the chain is inspected.
-        send_message(&mut client, &P2PMessage::Ping { timestamp: 43 })
+        let inbound = timeout(Duration::from_secs(2), block_receiver.recv())
             .await
-            .unwrap();
-        assert!(matches!(
-            recv_message(&mut client).await.unwrap(),
-            P2PMessage::Pong { timestamp: 43 }
-        ));
-
-        assert!(chain.lock().await.block_by_hash(&block_hash).is_none());
+            .unwrap()
+            .expect("inbound block should reach the unified importer");
+        assert_eq!(inbound.block.hash().to_string(), block_hash);
+        assert_eq!(inbound.peer_addr, addr.to_string());
 
         drop(client);
         timeout(Duration::from_secs(2), handle)

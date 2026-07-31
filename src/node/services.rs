@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
-use crate::chain::{AcceptResult, ChainState};
+use crate::chain::{apply_block, AcceptResult, ChainState};
 use crate::config::constants::{BLOCK_TARGET_TXS, MIN_PEERS_FOR_MINING};
 use crate::config::settings::Settings;
 use crate::mempool::Mempool;
 use crate::miner::MinerManager;
 use crate::node::recovery::RecoveryState;
-use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
+use crate::p2p::connection::{recv_message, send_message, InboundBlock, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::{PeerManager, PeerState};
 use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
@@ -31,15 +31,29 @@ pub async fn start_services(
     settings: &Settings,
 ) -> Result<()> {
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
-    let conn_mgr = Arc::new(P2PConnectionManager::new_with_advertised(
-        p2p_addr,
-        chain.clone(),
-        peer_manager.clone(),
-        settings.p2p_advertised_host.clone(),
-        settings.p2p_advertised_port,
-        settings.allow_private_peer_addresses,
-    ));
+    let (inbound_block_sender, inbound_block_receiver) = mpsc::channel(64);
+    let conn_mgr = Arc::new(
+        P2PConnectionManager::new_with_advertised(
+            p2p_addr,
+            chain.clone(),
+            peer_manager.clone(),
+            settings.p2p_advertised_host.clone(),
+            settings.p2p_advertised_port,
+            settings.allow_private_peer_addresses,
+        )
+        .with_block_receiver(inbound_block_sender),
+    );
     let listener = conn_mgr.bind_listener().await?;
+
+    {
+        let chain_ref = chain.clone();
+        let mempool_ref = mempool.clone();
+        let conn_mgr_ref = conn_mgr.clone();
+        tokio::spawn(async move {
+            import_announced_blocks(inbound_block_receiver, chain_ref, mempool_ref, conn_mgr_ref)
+                .await;
+        });
+    }
 
     {
         let mgr = conn_mgr.clone();
@@ -104,6 +118,7 @@ pub async fn start_services(
             let chain_ref = chain.clone();
             let peer_manager_ref = peer_manager.clone();
             let mempool_ref = mempool.clone();
+            let conn_mgr_ref = conn_mgr.clone();
             let miner_addr = settings.miner_address.clone();
             let recovery_ref = recovery_state.clone();
             tokio::spawn(async move {
@@ -155,6 +170,7 @@ pub async fn start_services(
                     let Some(block) = mined else {
                         continue;
                     };
+                    let announced_block = block.clone();
                     let confirmed_tx_ids: Vec<String> =
                         block.txs.iter().map(canonical_tx_id).collect();
                     let mut chain_guard = chain_ref.lock().await;
@@ -173,6 +189,12 @@ pub async fn start_services(
                             tracing::info!(
                                 "[MINER] accepted mined block and cleared {} txs",
                                 confirmed_tx_ids.len()
+                            );
+                            let recipients = conn_mgr_ref.announce_block(&announced_block, None);
+                            tracing::debug!(
+                                "[P2P] announced locally mined block {} to {} sessions",
+                                announced_block.hash(),
+                                recipients
                             );
                         }
                         AcceptResult::SideChain { .. } => {
@@ -193,6 +215,70 @@ pub async fn start_services(
     }
 
     Ok(())
+}
+
+async fn import_announced_blocks(
+    mut receiver: mpsc::Receiver<InboundBlock>,
+    chain: Arc<Mutex<ChainState>>,
+    mempool: Arc<Mempool>,
+    conn_mgr: Arc<P2PConnectionManager>,
+) {
+    while let Some(InboundBlock { block, peer_addr }) = receiver.recv().await {
+        let block_hash = block.hash().to_string();
+        let confirmed_tx_ids: Vec<String> = block.txs.iter().map(canonical_tx_id).collect();
+        let result = {
+            let mut chain_guard = chain.lock().await;
+            let result = apply_block(&mut chain_guard, &block, Some(&peer_addr));
+            if matches!(result, AcceptResult::CanonExtension { .. }) {
+                chain_guard.refresh_cached_state_root_from_tip();
+                mempool.remove_confirmed(&confirmed_tx_ids);
+                if let Some(recovery) = chain_guard.pending_reorg_recovery.take() {
+                    let report = mempool.requeue_after_reorg(&chain_guard, recovery);
+                    tracing::info!(
+                        "[MEMPOOL] announced-block reorg recovery accepted={} rejected={}",
+                        report.accepted.len(),
+                        report.rejected.len()
+                    );
+                }
+            }
+            result
+        };
+
+        match result {
+            AcceptResult::CanonExtension { height } => {
+                let recipients = conn_mgr.announce_block(&block, Some(&peer_addr));
+                tracing::info!(
+                    "[P2P] accepted announced block height={} hash={} peer={} relayed_to={}",
+                    height,
+                    block_hash,
+                    peer_addr,
+                    recipients
+                );
+            }
+            AcceptResult::SideChain { .. } => {
+                tracing::debug!(
+                    "[P2P] announced block {} from {} stored on side chain",
+                    block_hash,
+                    peer_addr
+                );
+            }
+            AcceptResult::StoredOrphan { .. } => {
+                tracing::debug!(
+                    "[P2P] announced block {} from {} stored as orphan",
+                    block_hash,
+                    peer_addr
+                );
+            }
+            AcceptResult::Rejected(reason) => {
+                tracing::debug!(
+                    "[P2P] announced block {} from {} rejected: {}",
+                    block_hash,
+                    peer_addr,
+                    reason
+                );
+            }
+        }
+    }
 }
 
 async fn seed_peer_loop(
@@ -294,12 +380,30 @@ async fn seed_peer_loop(
                     }
                 }
 
-                loop {
+                let sessions = conn_mgr.sessions();
+                let (session_generation, mut session_receiver) =
+                    sessions.register(peer_addr.clone());
+                let mut requested_block_hash = None;
+
+                'session: loop {
+                    while let Ok(outbound) = session_receiver.try_recv() {
+                        if let Err(error) = send_message(&mut stream, &outbound).await {
+                            tracing::debug!(
+                                "[P2P] {} outbound session send error: {}",
+                                peer_addr,
+                                error
+                            );
+                            break 'session;
+                        }
+                    }
+
                     let remote_summary = match poll_peer_height(
                         &mut stream,
                         &peer_addr,
                         &chain,
                         &peer_manager,
+                        &conn_mgr,
+                        &mut requested_block_hash,
                     )
                     .await
                     {
@@ -412,16 +516,24 @@ async fn seed_peer_loop(
                         .await
                     {
                         Ok(Ok(P2PMessage::Pong { .. })) => {}
-                        Ok(Ok(P2PMessage::Disconnect { reason })) => {
-                            tracing::debug!("[P2P] {} disconnected: {}", peer_addr, reason);
-                            break;
-                        }
-                        Ok(Ok(other)) => {
-                            tracing::debug!(
-                                "[P2P] {} unexpected keepalive reply: {}",
-                                peer_addr,
-                                other.label()
-                            );
+                        Ok(Ok(message)) => {
+                            if let Err(error) = handle_seed_session_message(
+                                &mut stream,
+                                message,
+                                &peer_addr,
+                                &chain,
+                                &conn_mgr,
+                                &mut requested_block_hash,
+                            )
+                            .await
+                            {
+                                tracing::debug!(
+                                    "[P2P] {} keepalive message error: {}",
+                                    peer_addr,
+                                    error
+                                );
+                                break;
+                            }
                         }
                         Ok(Err(e)) => {
                             tracing::debug!("[P2P] {} keepalive read error: {}", peer_addr, e);
@@ -434,6 +546,7 @@ async fn seed_peer_loop(
                     }
                 }
 
+                sessions.unregister(&peer_addr, session_generation);
                 peer_manager.set_state(&peer_addr, PeerState::Disconnected);
             }
             Err(e) => {
@@ -451,6 +564,8 @@ async fn poll_peer_height(
     peer_addr: &str,
     chain: &Arc<Mutex<ChainState>>,
     peer_manager: &Arc<PeerManager>,
+    conn_mgr: &Arc<P2PConnectionManager>,
+    requested_block_hash: &mut Option<String>,
 ) -> Result<ChainSummary> {
     peer_manager.record_height_poll_sent(peer_addr);
     send_message(stream, &P2PMessage::GetHeight).await?;
@@ -475,10 +590,15 @@ async fn poll_peer_height(
                 return Err(anyhow::anyhow!("peer rejected height query: {}", reason))
             }
             Ok(Ok(other)) => {
-                return Err(anyhow::anyhow!(
-                    "unexpected height reply: {}",
-                    other.label()
-                ))
+                handle_seed_session_message(
+                    stream,
+                    other,
+                    peer_addr,
+                    chain,
+                    conn_mgr,
+                    requested_block_hash,
+                )
+                .await?;
             }
             Ok(Err(e)) => return Err(anyhow::anyhow!("height poll read error: {}", e)),
             Err(_) => return Err(anyhow::anyhow!("height poll timeout for {}", peer_addr)),
@@ -504,6 +624,84 @@ async fn poll_peer_height(
     Ok(remote_summary)
 }
 
+async fn handle_seed_session_message(
+    stream: &mut (impl tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin),
+    message: P2PMessage,
+    peer_addr: &str,
+    chain: &Arc<Mutex<ChainState>>,
+    conn_mgr: &Arc<P2PConnectionManager>,
+    requested_block_hash: &mut Option<String>,
+) -> Result<()> {
+    match message {
+        P2PMessage::AnnounceBlock(announcement) => {
+            if !is_canonical_hash(&announcement.hash) || !is_canonical_hash(&announcement.prev) {
+                anyhow::bail!("peer sent malformed block announcement");
+            }
+            let known = chain
+                .lock()
+                .await
+                .block_by_hash(&announcement.hash)
+                .is_some();
+            if !known && requested_block_hash.is_none() {
+                *requested_block_hash = Some(announcement.hash.clone());
+                send_message(
+                    stream,
+                    &P2PMessage::GetBlock {
+                        hash: announcement.hash,
+                    },
+                )
+                .await?;
+            }
+        }
+        P2PMessage::GetBlock { hash } => {
+            let block = chain.lock().await.block_by_hash(&hash);
+            let Some(block) = block else {
+                anyhow::bail!("peer requested unknown block {}", hash);
+            };
+            send_message(stream, &P2PMessage::Block { block }).await?;
+        }
+        P2PMessage::Block { block } => {
+            let Some(expected_hash) = requested_block_hash.take() else {
+                anyhow::bail!("peer sent an unrequested block");
+            };
+            let actual_hash = block.hash().to_string();
+            if actual_hash != expected_hash {
+                anyhow::bail!(
+                    "peer returned block {} for request {}",
+                    actual_hash,
+                    expected_hash
+                );
+            }
+            conn_mgr
+                .queue_inbound_block(block, peer_addr.to_string())
+                .await?;
+        }
+        P2PMessage::GetHeight => {
+            let summary = {
+                let chain_guard = chain.lock().await;
+                ChainSummary::from_chain(&chain_guard)
+            };
+            send_message(stream, &P2PMessage::Height { summary }).await?;
+        }
+        P2PMessage::Ping { timestamp } => {
+            send_message(stream, &P2PMessage::Pong { timestamp }).await?;
+        }
+        P2PMessage::Pong { .. } | P2PMessage::Height { .. } => {}
+        P2PMessage::Disconnect { reason } => {
+            anyhow::bail!("peer disconnected: {}", reason);
+        }
+        other => anyhow::bail!("unexpected session message: {}", other.label()),
+    }
+    Ok(())
+}
+
+fn is_canonical_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn unix_timestamp_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -515,6 +713,7 @@ fn unix_timestamp_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::config::settings::Settings;
+    use crate::genesis::genesis_block;
     use crate::p2p::messages::P2PMessage;
     use crate::p2p::peer_manager::PeerState;
     use std::net::TcpListener as StdTcpListener;
@@ -578,9 +777,22 @@ mod tests {
         pm.upsert(peer_addr, true);
         pm.set_state(peer_addr, PeerState::Connected);
         let (mut client, handle) = scripted_height_peer(42).await;
-        let remote_summary = poll_peer_height(&mut client, peer_addr, &chain, &pm)
-            .await
-            .unwrap();
+        let conn_mgr = Arc::new(P2PConnectionManager::new(
+            "127.0.0.1:0".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        ));
+        let mut requested_block_hash = None;
+        let remote_summary = poll_peer_height(
+            &mut client,
+            peer_addr,
+            &chain,
+            &pm,
+            &conn_mgr,
+            &mut requested_block_hash,
+        )
+        .await
+        .unwrap();
         assert_eq!(remote_summary.height, 42);
         assert_eq!(remote_summary.cumulative_work, 42);
         assert_eq!(pm.best_remote_height(), 42);
@@ -595,9 +807,72 @@ mod tests {
         pm.upsert(peer_addr, true);
         pm.set_state(peer_addr, PeerState::Connected);
         let (mut client, _server) = duplex(4096);
-        let result = poll_peer_height(&mut client, peer_addr, &chain, &pm).await;
+        let conn_mgr = Arc::new(P2PConnectionManager::new(
+            "127.0.0.1:0".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        ));
+        let mut requested_block_hash = None;
+        let result = poll_peer_height(
+            &mut client,
+            peer_addr,
+            &chain,
+            &pm,
+            &conn_mgr,
+            &mut requested_block_hash,
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(pm.best_remote_height(), 0);
+    }
+
+    #[tokio::test]
+    async fn announced_block_uses_unified_import_and_relays_to_other_sessions() {
+        let chain = temp_chain();
+        let peer_manager = temp_peer_manager();
+        let conn_mgr = Arc::new(P2PConnectionManager::new(
+            "127.0.0.1:0".parse().unwrap(),
+            chain.clone(),
+            peer_manager,
+        ));
+        let sessions = conn_mgr.sessions();
+        let (source_generation, mut source_messages) =
+            sessions.register("127.0.0.1:19120".to_string());
+        let (other_generation, mut other_messages) =
+            sessions.register("127.0.0.1:19121".to_string());
+        let (sender, receiver) = mpsc::channel(1);
+        let importer = tokio::spawn(import_announced_blocks(
+            receiver,
+            chain.clone(),
+            Arc::new(Mempool::new()),
+            conn_mgr,
+        ));
+
+        let block = genesis_block();
+        let block_hash = block.hash().to_string();
+        sender
+            .send(InboundBlock {
+                block,
+                peer_addr: "127.0.0.1:19120".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let relayed = tokio::time::timeout(Duration::from_secs(2), other_messages.recv())
+            .await
+            .unwrap()
+            .expect("accepted block should be relayed to another active session");
+        match relayed {
+            P2PMessage::AnnounceBlock(announcement) => assert_eq!(announcement.hash, block_hash),
+            other => panic!("expected relayed block announcement, got {:?}", other),
+        }
+        assert!(source_messages.try_recv().is_err());
+        assert!(chain.lock().await.block_by_hash(&block_hash).is_some());
+
+        sessions.unregister("127.0.0.1:19120", source_generation);
+        sessions.unregister("127.0.0.1:19121", other_generation);
+        drop(sender);
+        importer.await.unwrap();
     }
 
     #[tokio::test]
