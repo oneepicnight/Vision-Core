@@ -477,8 +477,6 @@ async fn seed_peer_loop(
                 match validate_handshake(&remote_hs, local_nonce) {
                     HandshakeResult::Accepted => {
                         peer_manager.upsert(&peer_addr, true);
-                        peer_manager.set_state(&peer_addr, PeerState::Connected);
-                        peer_manager.note_peer_height(&peer_addr, remote_hs.chain_height, false);
                         let local_height = chain.lock().await.current_height();
                         tracing::info!(
                             "[P2P] {} handshake complete local_height={} remote_height={}",
@@ -519,6 +517,8 @@ async fn seed_peer_loop(
                 let sessions = conn_mgr.sessions();
                 let (session_generation, mut session_receiver) =
                     sessions.register(peer_addr.clone());
+                peer_manager.connect_session(&peer_addr, session_generation);
+                peer_manager.note_peer_height(&peer_addr, remote_hs.chain_height, false);
                 let mut requested_block_hash = None;
 
                 'session: loop {
@@ -682,8 +682,10 @@ async fn seed_peer_loop(
                     }
                 }
 
-                sessions.unregister(&peer_addr, session_generation);
-                peer_manager.set_state(&peer_addr, PeerState::Disconnected);
+                if let Some(latest_generation) = sessions.unregister(&peer_addr, session_generation)
+                {
+                    peer_manager.disconnect_if_generation(&peer_addr, latest_generation);
+                }
             }
             Err(e) => {
                 tracing::debug!("[P2P] {} connect error: {}", peer_addr, e);

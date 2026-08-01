@@ -40,9 +40,14 @@ struct SessionSender {
     sender: mpsc::Sender<P2PMessage>,
 }
 
+struct PeerSessions {
+    latest_generation: u64,
+    active: Vec<SessionSender>,
+}
+
 pub(crate) struct PeerSessionRegistry {
     next_generation: AtomicU64,
-    sessions: std::sync::Mutex<HashMap<String, SessionSender>>,
+    sessions: std::sync::Mutex<HashMap<String, PeerSessions>>,
 }
 
 impl PeerSessionRegistry {
@@ -56,21 +61,33 @@ impl PeerSessionRegistry {
     pub(crate) fn register(&self, peer_addr: String) -> (u64, mpsc::Receiver<P2PMessage>) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(peer_addr, SessionSender { generation, sender });
+        let mut sessions = self.sessions.lock().unwrap();
+        let peer_sessions = sessions.entry(peer_addr).or_insert_with(|| PeerSessions {
+            latest_generation: generation,
+            active: Vec::new(),
+        });
+        peer_sessions.latest_generation = generation;
+        peer_sessions
+            .active
+            .push(SessionSender { generation, sender });
         (generation, receiver)
     }
 
-    pub(crate) fn unregister(&self, peer_addr: &str, generation: u64) {
+    /// Remove one transport. Returns the peer's latest session generation only
+    /// when no live transport remains for that durable peer identity.
+    pub(crate) fn unregister(&self, peer_addr: &str, generation: u64) -> Option<u64> {
         let mut sessions = self.sessions.lock().unwrap();
-        if sessions
-            .get(peer_addr)
-            .is_some_and(|session| session.generation == generation)
-        {
-            sessions.remove(peer_addr);
+        let peer_sessions = sessions.get_mut(peer_addr)?;
+        let original_len = peer_sessions.active.len();
+        peer_sessions
+            .active
+            .retain(|session| session.generation != generation);
+        if peer_sessions.active.len() == original_len || !peer_sessions.active.is_empty() {
+            return None;
         }
+        let latest_generation = peer_sessions.latest_generation;
+        sessions.remove(peer_addr);
+        Some(latest_generation)
     }
 
     fn announce_block(&self, block: &Block, exclude_peer: Option<&str>) -> usize {
@@ -84,7 +101,12 @@ impl PeerSessionRegistry {
         sessions
             .iter()
             .filter(|(peer_addr, _)| exclude_peer != Some(peer_addr.as_str()))
-            .filter(|(_, session)| session.sender.try_send(message.clone()).is_ok())
+            .filter(|(_, peer_sessions)| {
+                peer_sessions
+                    .active
+                    .iter()
+                    .any(|session| session.sender.try_send(message.clone()).is_ok())
+            })
             .count()
     }
 }
@@ -438,7 +460,7 @@ async fn handle_inbound_with_runtime<S>(
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     let mut handshake_done = false;
-    let mut active_session: Option<(String, u64, u64)> = None;
+    let mut active_session: Option<(String, u64)> = None;
     let mut session_receiver: Option<mpsc::Receiver<P2PMessage>> = None;
     let mut requested_block_hash: Option<String> = None;
 
@@ -506,12 +528,6 @@ async fn handle_inbound_with_runtime<S>(
                                         break;
                                     }
                                 };
-                                peer_manager.set_state(&peer_key, PeerState::Connected);
-                                peer_manager.note_peer_height(
-                                    &peer_key,
-                                    remote_hs.chain_height,
-                                    false,
-                                );
                                 if let Some(discovered_peers) = discovered_peers.as_ref() {
                                     for candidate in
                                         remote_hs.seed_peers.iter().take(MAX_SHARED_PEERS)
@@ -534,33 +550,32 @@ async fn handle_inbound_with_runtime<S>(
                                 }
                                 tracing::trace!("[P2P] -> {} Handshake accepted", addr);
                                 handshake_done = true;
+                                let (generation, receiver) = sessions.register(peer_key.clone());
+                                peer_manager.connect_session(&peer_key, generation);
+                                peer_manager.note_peer_height(
+                                    &peer_key,
+                                    remote_hs.chain_height,
+                                    false,
+                                );
+                                active_session = Some((peer_key.clone(), generation));
+                                session_receiver = Some(receiver);
                                 if peer_key != observed_addr {
-                                    if let Some(generation) =
-                                        peer_manager.peer_generation(&peer_key)
+                                    if let Err(e) = request_inbound_peer_summary(
+                                        &mut stream,
+                                        &peer_key,
+                                        generation,
+                                        &chain,
+                                        &peer_manager,
+                                    )
+                                    .await
                                     {
-                                        if let Err(e) = request_inbound_peer_summary(
-                                            &mut stream,
-                                            &peer_key,
-                                            generation,
-                                            &chain,
-                                            &peer_manager,
-                                        )
-                                        .await
-                                        {
-                                            tracing::debug!(
-                                                "[P2P] {} inbound summary refresh failed: {}",
-                                                peer_key,
-                                                e
-                                            );
-                                        }
+                                        tracing::debug!(
+                                            "[P2P] {} inbound summary refresh failed: {}",
+                                            peer_key,
+                                            e
+                                        );
                                     }
                                 }
-                                let (generation, receiver) = sessions.register(peer_key.clone());
-                                let peer_generation = peer_manager
-                                    .peer_generation(&peer_key)
-                                    .expect("accepted inbound peer should have a generation");
-                                active_session = Some((peer_key, generation, peer_generation));
-                                session_receiver = Some(receiver);
                             }
                             other => {
                                 peer_manager.upsert(&addr.to_string(), false);
@@ -697,7 +712,7 @@ async fn handle_inbound_with_runtime<S>(
                         };
                         let peer_addr = active_session
                             .as_ref()
-                            .map(|(peer_addr, _, _)| peer_addr.clone())
+                            .map(|(peer_addr, _)| peer_addr.clone())
                             .unwrap_or_else(|| addr.to_string());
                         if sender
                             .send(InboundBlock { block, peer_addr })
@@ -709,7 +724,7 @@ async fn handle_inbound_with_runtime<S>(
                         }
                     }
                     P2PMessage::Height { summary } => {
-                        if let Some((peer_addr, _, _)) = active_session.as_ref() {
+                        if let Some((peer_addr, _)) = active_session.as_ref() {
                             peer_manager.note_peer_summary(peer_addr, summary, false);
                         }
                     }
@@ -737,9 +752,10 @@ async fn handle_inbound_with_runtime<S>(
         }
     }
 
-    if let Some((peer_addr, session_generation, peer_generation)) = active_session {
-        sessions.unregister(&peer_addr, session_generation);
-        peer_manager.disconnect_if_generation(&peer_addr, peer_generation);
+    if let Some((peer_addr, session_generation)) = active_session {
+        if let Some(latest_generation) = sessions.unregister(&peer_addr, session_generation) {
+            peer_manager.disconnect_if_generation(&peer_addr, latest_generation);
+        }
     }
 }
 
@@ -817,6 +833,68 @@ mod tests {
             }
             other => panic!("expected handshake response, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn same_peer_transports_preserve_primary_route_until_final_cleanup() {
+        let sessions = PeerSessionRegistry::new();
+        let peer_addr = "127.0.0.1:19020";
+        let (first_generation, mut first_receiver) = sessions.register(peer_addr.to_string());
+        let (second_generation, mut second_receiver) = sessions.register(peer_addr.to_string());
+
+        assert!(matches!(
+            first_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            second_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let block = genesis_block();
+        assert_eq!(sessions.announce_block(&block, None), 1);
+        assert!(matches!(
+            first_receiver.try_recv(),
+            Ok(P2PMessage::AnnounceBlock(_))
+        ));
+        assert!(matches!(
+            second_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        assert_eq!(sessions.unregister(peer_addr, first_generation), None);
+        assert_eq!(sessions.announce_block(&block, None), 1);
+        assert!(matches!(
+            second_receiver.try_recv(),
+            Ok(P2PMessage::AnnounceBlock(_))
+        ));
+        assert_eq!(
+            sessions.unregister(peer_addr, second_generation),
+            Some(second_generation)
+        );
+    }
+
+    #[test]
+    fn peer_disconnects_only_after_its_final_transport_closes() {
+        let sessions = PeerSessionRegistry::new();
+        let peer_manager = PeerManager::new();
+        let peer_addr = "127.0.0.1:19021";
+        peer_manager.upsert(peer_addr, true);
+
+        let (first_generation, _first_receiver) = sessions.register(peer_addr.to_string());
+        peer_manager.connect_session(peer_addr, first_generation);
+        let (second_generation, _second_receiver) = sessions.register(peer_addr.to_string());
+        peer_manager.connect_session(peer_addr, second_generation);
+
+        assert_eq!(sessions.unregister(peer_addr, second_generation), None);
+        assert_eq!(peer_manager.connected_count(), 1);
+
+        let latest_generation = sessions
+            .unregister(peer_addr, first_generation)
+            .expect("final transport should return the latest peer generation");
+        assert_eq!(latest_generation, second_generation);
+        assert!(peer_manager.disconnect_if_generation(peer_addr, latest_generation));
+        assert_eq!(peer_manager.connected_count(), 0);
     }
 
     // -- framing round-trips -------------------------------------------------

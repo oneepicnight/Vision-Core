@@ -233,6 +233,19 @@ impl PeerManager {
         true
     }
 
+    /// Mark a successfully registered transport as connected.
+    ///
+    /// Session generations are assigned by the shared session registry. This
+    /// lets the final transport cleanup distinguish itself from a newer
+    /// connection established concurrently for the same durable peer.
+    pub(crate) fn connect_session(&self, addr: &str, generation: u64) {
+        let mut peers = self.peers.write().unwrap();
+        if let Some(peer) = peers.get_mut(addr) {
+            peer.connection_generation = peer.connection_generation.max(generation);
+            peer.state = PeerState::Connected;
+        }
+    }
+
     /// Record a height received from a handshake.
     ///
     /// Handshake height is intentionally height-only. It must not overwrite a
@@ -461,7 +474,6 @@ impl PeerManager {
         let peer = peers
             .entry(durable_addr.clone())
             .or_insert_with(|| Peer::new(durable_addr.clone(), false));
-        peer.connection_generation = peer.connection_generation.saturating_add(1);
         peer.observed_addr = Some(observed_addr.to_string());
         if durable_addr != observed_addr {
             peer.advertised_addr = Some(durable_addr.clone());
@@ -598,12 +610,12 @@ mod tests {
         let key = pm
             .resolve_inbound_peer_key("127.0.0.1:51000", &hs, true)
             .unwrap();
+        pm.connect_session(&key, 1);
         let first_generation = pm.peer_generation(&key).unwrap();
-        pm.set_state(&key, PeerState::Connected);
         pm.resolve_inbound_peer_key("127.0.0.1:51001", &hs, true)
             .unwrap();
+        pm.connect_session(&key, 2);
         let second_generation = pm.peer_generation(&key).unwrap();
-        pm.set_state(&key, PeerState::Connected);
 
         assert!(!pm.disconnect_if_generation(&key, first_generation));
         assert_eq!(pm.connected_count(), 1);
@@ -630,7 +642,7 @@ mod tests {
         let key = pm
             .resolve_inbound_peer_key("127.0.0.1:51000", &advertised_hs("127.0.0.1", 9001), true)
             .unwrap();
-        pm.set_state(&key, PeerState::Connected);
+        pm.connect_session(&key, 1);
         pm.note_peer_summary(
             &key,
             ChainSummary::new(81, Some("remote".to_string()), 1757),
@@ -666,6 +678,7 @@ mod tests {
 
         pm.resolve_inbound_peer_key("127.0.0.1:51001", &advertised_hs("127.0.0.1", 9001), true)
             .unwrap();
+        pm.connect_session(&key, 2);
         pm.note_peer_summary_from(
             &key,
             ChainSummary::new(200, Some("stale".to_string()), 9000),
