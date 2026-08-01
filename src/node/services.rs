@@ -99,6 +99,7 @@ pub async fn start_services(
         let mempool_ref = mempool.clone();
         let conn_mgr_ref = conn_mgr.clone();
         let miner_manager_ref = miner_manager.clone();
+        let recovery_ref = recovery_state.clone();
         tokio::spawn(async move {
             import_announced_blocks(
                 inbound_block_receiver,
@@ -106,6 +107,7 @@ pub async fn start_services(
                 mempool_ref,
                 conn_mgr_ref,
                 miner_manager_ref,
+                recovery_ref,
             )
             .await;
         });
@@ -351,6 +353,7 @@ async fn import_announced_blocks(
     mempool: Arc<Mempool>,
     conn_mgr: Arc<P2PConnectionManager>,
     miner_manager: Option<Arc<MinerManager>>,
+    recovery_state: Arc<RecoveryState>,
 ) {
     while let Some(InboundBlock { block, peer_addr }) = receiver.recv().await {
         let block_hash = block.hash().to_string();
@@ -375,6 +378,11 @@ async fn import_announced_blocks(
 
         match result {
             AcceptResult::CanonExtension { height } => {
+                let local_summary = {
+                    let chain_guard = chain.lock().await;
+                    ChainSummary::from_chain(&chain_guard)
+                };
+                recovery_state.clear_if_local_satisfies_claim(&local_summary);
                 if let Some(miner_manager) = miner_manager.as_ref() {
                     miner_manager.clear_job();
                 }
@@ -1009,16 +1017,28 @@ mod tests {
         let (other_generation, mut other_messages) =
             sessions.register("127.0.0.1:19121".to_string());
         let (sender, receiver) = mpsc::channel(1);
+        let recovery_state = Arc::new(RecoveryState::new());
+        let local_summary = {
+            let chain_guard = chain.lock().await;
+            ChainSummary::from_chain(&chain_guard)
+        };
+        let block = genesis_block();
+        let block_hash = block.hash().to_string();
+        let remote_summary = ChainSummary::new(
+            block.header.number,
+            Some(block_hash.clone()),
+            block.header.difficulty as u128,
+        );
+        recovery_state.begin_higher_work_recovery("127.0.0.1:19120", local_summary, remote_summary);
         let importer = tokio::spawn(import_announced_blocks(
             receiver,
             chain.clone(),
             Arc::new(Mempool::new()),
             conn_mgr,
             None,
+            recovery_state.clone(),
         ));
 
-        let block = genesis_block();
-        let block_hash = block.hash().to_string();
         sender
             .send(InboundBlock {
                 block,
@@ -1037,6 +1057,7 @@ mod tests {
         }
         assert!(source_messages.try_recv().is_err());
         assert!(chain.lock().await.block_by_hash(&block_hash).is_some());
+        assert!(!recovery_state.should_pause_mining());
 
         sessions.unregister("127.0.0.1:19120", source_generation);
         sessions.unregister("127.0.0.1:19121", other_generation);

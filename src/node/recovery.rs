@@ -118,6 +118,22 @@ impl RecoveryState {
         inner.claim = None;
     }
 
+    /// Clear a higher-work claim once the local canonical chain has caught up
+    /// to or surpassed the work advertised by that claim.
+    pub fn clear_if_local_satisfies_claim(&self, local_summary: &ChainSummary) -> bool {
+        let mut inner = self.inner.write().unwrap();
+        let claim_satisfied = inner.claim.as_ref().is_some_and(|claim| {
+            local_summary.cumulative_work >= claim.remote_summary.cumulative_work
+        });
+        if claim_satisfied {
+            tracing::info!(
+                "[RECOVERY] recovery cleared: accepted block satisfied higher-work claim"
+            );
+            inner.claim = None;
+        }
+        claim_satisfied
+    }
+
     pub fn should_pause_mining(&self) -> bool {
         self.inner.read().unwrap().claim.is_some()
     }
@@ -210,6 +226,19 @@ mod tests {
         let recovery = RecoveryState::new();
         recovery.begin_higher_work_recovery("peer", summary(1, "a", 1), summary(2, "b", 2));
         recovery.clear("adopted");
+        assert!(!recovery.should_pause_mining());
+        assert_eq!(recovery.mode(), RecoveryMode::Normal);
+    }
+
+    #[test]
+    fn local_work_satisfying_claim_resumes_mining() {
+        let recovery = RecoveryState::new();
+        recovery.begin_higher_work_recovery("peer", summary(4, "a", 7), summary(5, "b", 11));
+
+        assert!(!recovery.clear_if_local_satisfies_claim(&summary(5, "c", 10)));
+        assert!(recovery.should_pause_mining());
+
+        assert!(recovery.clear_if_local_satisfies_claim(&summary(5, "b", 11)));
         assert!(!recovery.should_pause_mining());
         assert_eq!(recovery.mode(), RecoveryMode::Normal);
     }
