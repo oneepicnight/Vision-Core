@@ -273,10 +273,28 @@ pub(crate) async fn live_sync_from_peer(
     } else {
         tracing::info!("[SYNC] received 0 blocks from {}", peer_addr);
     }
+    import_fetched_blocks(chain, mempool, peer_addr, fetched).await
+}
+
+async fn import_fetched_blocks(
+    chain: &Arc<Mutex<ChainState>>,
+    mempool: Option<&Mempool>,
+    peer_addr: &str,
+    fetched: Vec<crate::types::Block>,
+) -> Result<usize> {
     let mut imported = 0usize;
     for block in fetched {
+        let block_hash = block.hash().to_string();
         let result = {
             let mut g = chain.lock().await;
+            if g.block_by_hash(&block_hash).is_some() {
+                tracing::debug!(
+                    "[SYNC] skipped already-known block height={} hash={}",
+                    block.header.number,
+                    block_hash
+                );
+                continue;
+            }
             apply_block(&mut g, &block, Some(peer_addr))
         };
         match result {
@@ -298,7 +316,7 @@ pub(crate) async fn live_sync_from_peer(
                 tracing::debug!(
                     "[SYNC] imported block height={} hash={}",
                     block.header.number,
-                    block.hash()
+                    block_hash
                 );
                 imported += 1;
             }
@@ -306,7 +324,7 @@ pub(crate) async fn live_sync_from_peer(
                 tracing::debug!(
                     "[SYNC] imported side-chain block height={} hash={}",
                     block.header.number,
-                    block.hash()
+                    block_hash
                 );
                 imported += 1;
             }
@@ -762,6 +780,27 @@ mod tests {
 
         peer_task.await.unwrap();
         assert!(guard.is_throttled());
+    }
+
+    #[tokio::test]
+    async fn sync_import_continues_when_relay_already_stored_a_fetched_block() {
+        let remote_blocks = build_blocks(3, None);
+        let mut local_chain = seeded_chain(&remote_blocks);
+        assert!(matches!(
+            apply_block(&mut local_chain, &remote_blocks[1], Some("relay")),
+            AcceptResult::CanonExtension { height: 2 }
+        ));
+        let chain = Arc::new(Mutex::new(local_chain));
+
+        let imported =
+            import_fetched_blocks(&chain, None, "127.0.0.1:19000", remote_blocks[1..].to_vec())
+                .await
+                .unwrap();
+
+        assert_eq!(imported, 1);
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 3);
+        assert_eq!(g.tip_hash(), remote_blocks[2].hash());
     }
 
     #[tokio::test]
