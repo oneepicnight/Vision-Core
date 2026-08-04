@@ -235,12 +235,32 @@ pub(crate) async fn live_sync_from_peer(
             },
         )
         .await?;
-        let block = match recv_message(&mut stream).await? {
-            P2PMessage::Block { block } => block,
-            P2PMessage::Disconnect { reason } => {
-                return Err(anyhow!("peer rejected block request: {}", reason))
+        let block = loop {
+            match recv_message(&mut stream).await? {
+                P2PMessage::Block { block } => break block,
+                P2PMessage::AnnounceBlock(announcement) => {
+                    tracing::debug!(
+                        "[SYNC] deferred announcement height={} while awaiting block {} from {}",
+                        announcement.height,
+                        current_hash,
+                        peer_addr
+                    );
+                }
+                P2PMessage::GetHeight => {
+                    let summary = {
+                        let g = chain.lock().await;
+                        ChainSummary::from_chain(&g)
+                    };
+                    send_message(&mut stream, &P2PMessage::Height { summary }).await?;
+                }
+                P2PMessage::Ping { timestamp } => {
+                    send_message(&mut stream, &P2PMessage::Pong { timestamp }).await?;
+                }
+                P2PMessage::Disconnect { reason } => {
+                    return Err(anyhow!("peer rejected block request: {}", reason))
+                }
+                other => return Err(anyhow!("unexpected block reply: {}", other.label())),
             }
-            other => return Err(anyhow!("unexpected block reply: {}", other.label())),
         };
 
         if block.hash() != current_hash {
