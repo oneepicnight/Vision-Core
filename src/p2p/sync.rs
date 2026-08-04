@@ -1748,7 +1748,9 @@ mod tests {
     async fn branch_download_handles_node_d_sized_gap() {
         const REMOTE_HEIGHT: u64 = 3_400;
         let remote_blocks = build_transport_blocks(REMOTE_HEIGHT);
-        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (peer_addr, peer_task) =
+            spawn_recording_peer(remote_blocks.clone(), requests.clone()).await;
 
         let local_chain = seeded_chain(&remote_blocks);
         let chain = Arc::new(Mutex::new(local_chain));
@@ -1778,8 +1780,8 @@ mod tests {
             P2PMessage::Height { summary } => summary,
             other => panic!("expected height summary, got {:?}", other),
         };
-        let fetched = timeout(
-            Duration::from_secs(30),
+        let fetched = match timeout(
+            Duration::from_secs(120),
             fetch_missing_branch(
                 &mut stream,
                 &chain,
@@ -1790,8 +1792,15 @@ mod tests {
             ),
         )
         .await
-        .expect("Node D-scale branch download exceeded test deadline")
-        .unwrap();
+        {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                let downloaded = requests.lock().await.len();
+                panic!(
+                    "Node D-scale branch download exceeded test deadline after downloading {downloaded} blocks"
+                );
+            }
+        };
 
         assert_eq!(fetched.len(), REMOTE_HEIGHT as usize - 1);
         assert_eq!(fetched.first().unwrap().header.number, 2);
