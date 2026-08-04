@@ -455,7 +455,7 @@ mod tests {
     use crate::config::constants::{DIFFICULTY_FLOOR, TARGET_BLOCK_TIME};
     use crate::genesis::genesis_block;
     use crate::p2p::peer_manager::PeerState;
-    use crate::p2p::protocol::HandshakeMessage;
+    use crate::p2p::protocol::{AnnounceBlock, HandshakeMessage};
     use crate::types::Block;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
@@ -530,6 +530,7 @@ mod tests {
     #[derive(Clone)]
     enum BlockReply {
         Matching,
+        AnnouncementThenMatching(AnnounceBlock),
         Specific(Block),
         MalformedFrame,
         Disconnect,
@@ -589,6 +590,18 @@ mod tests {
                     Ok(P2PMessage::GetBlock { hash }) => {
                         match replies.pop_front().unwrap_or(BlockReply::Matching) {
                             BlockReply::Matching => {
+                                if let Some(block) = by_hash.get(&hash).cloned() {
+                                    send_message(&mut stream, &P2PMessage::Block { block })
+                                        .await
+                                        .unwrap();
+                                } else {
+                                    break;
+                                }
+                            }
+                            BlockReply::AnnouncementThenMatching(announcement) => {
+                                send_message(&mut stream, &P2PMessage::AnnounceBlock(announcement))
+                                    .await
+                                    .unwrap();
                                 if let Some(block) = by_hash.get(&hash).cloned() {
                                     send_message(&mut stream, &P2PMessage::Block { block })
                                         .await
@@ -833,6 +846,49 @@ mod tests {
         let g = chain.lock().await;
         assert_eq!(g.current_height(), 1);
         assert_eq!(g.tip_hash(), remote_blocks[0].hash());
+        drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_sync_tolerates_announcement_before_requested_block() {
+        let remote_blocks = build_blocks(6, None);
+        let announcement = AnnounceBlock {
+            height: 7,
+            hash: "ab".repeat(32),
+            prev: remote_blocks.last().unwrap().hash().to_string(),
+        };
+        let (peer_addr, peer_task) = spawn_scripted_peer(
+            remote_blocks.clone(),
+            vec![BlockReply::AnnouncementThenMatching(announcement)],
+        )
+        .await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new(
+            "127.0.0.1:19113".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        );
+        let result = timeout(
+            Duration::from_secs(5),
+            live_sync_from_peer(&conn_mgr, &chain, pm.as_ref(), &peer, None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.unwrap(), 5);
+        let g = chain.lock().await;
+        assert_eq!(g.current_height(), 6);
+        assert_eq!(g.tip_hash(), remote_blocks.last().unwrap().hash());
         drop(g);
 
         peer_task.await.unwrap();
