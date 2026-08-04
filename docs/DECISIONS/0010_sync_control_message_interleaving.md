@@ -69,4 +69,3 @@ identity, block acceptance rule, or fork-choice rule changes.
   height traffic before the requested block.
 - The observed WAN evidence and candidate validation are recorded in
   [P2P Internet Soak Characterization](../P2P_INTERNET_SOAK_CHARACTERIZATION.md).
-
