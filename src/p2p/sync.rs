@@ -550,7 +550,7 @@ mod tests {
     #[derive(Clone)]
     enum BlockReply {
         Matching,
-        AnnouncementThenMatching(AnnounceBlock),
+        ControlTrafficThenMatching(AnnounceBlock),
         Specific(Block),
         MalformedFrame,
         Disconnect,
@@ -618,10 +618,24 @@ mod tests {
                                     break;
                                 }
                             }
-                            BlockReply::AnnouncementThenMatching(announcement) => {
+                            BlockReply::ControlTrafficThenMatching(announcement) => {
                                 send_message(&mut stream, &P2PMessage::AnnounceBlock(announcement))
                                     .await
                                     .unwrap();
+                                send_message(&mut stream, &P2PMessage::Ping { timestamp: 42 })
+                                    .await
+                                    .unwrap();
+                                match recv_message(&mut stream).await.unwrap() {
+                                    P2PMessage::Pong { timestamp: 42 } => {}
+                                    other => panic!("expected pong, got {:?}", other),
+                                }
+                                send_message(&mut stream, &P2PMessage::GetHeight)
+                                    .await
+                                    .unwrap();
+                                match recv_message(&mut stream).await.unwrap() {
+                                    P2PMessage::Height { .. } => {}
+                                    other => panic!("expected height, got {:?}", other),
+                                }
                                 if let Some(block) = by_hash.get(&hash).cloned() {
                                     send_message(&mut stream, &P2PMessage::Block { block })
                                         .await
@@ -872,7 +886,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_sync_tolerates_announcement_before_requested_block() {
+    async fn live_sync_tolerates_control_traffic_before_requested_block() {
         let remote_blocks = build_blocks(6, None);
         let announcement = AnnounceBlock {
             height: 7,
@@ -881,7 +895,7 @@ mod tests {
         };
         let (peer_addr, peer_task) = spawn_scripted_peer(
             remote_blocks.clone(),
-            vec![BlockReply::AnnouncementThenMatching(announcement)],
+            vec![BlockReply::ControlTrafficThenMatching(announcement)],
         )
         .await;
 
