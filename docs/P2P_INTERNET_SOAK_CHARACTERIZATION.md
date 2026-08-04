@@ -129,3 +129,24 @@ First promote the exact reviewed candidate, obtain green post-promotion CI,
 execute the 30-minute four-node dry run in the runbook, and confirm that blocks
 mined by each participant reach and converge on all others. A successful dry
 run is the final gate for starting the 48-hour rehearsal.
+
+## 2026-08-04 dry-run correction
+
+The first WAN dry run proved public seed connectivity and a successful P2P
+handshake, but it did not pass the synchronization gate. While the Linux node
+was downloading a higher-work branch, the mining seed sent `AnnounceBlock`
+before the `Block` response to the outstanding `GetBlock`. The client treated
+the valid asynchronous message as a fatal reply and remained at height 1.
+
+The corrective candidate based on
+`c141bb83cc307fedd6d73ee8fd86af6185799e5d` keeps an outstanding block request
+active while servicing block announcements, ping probes, and height queries.
+Only the requested full block can satisfy the request, and all downloaded
+blocks still enter ordinary block validation. Wire messages, protocol version,
+compatibility identity, cumulative-work fork choice, persistence, VisionX,
+and proof-of-work behavior remain unchanged. See
+[ADR-0010](DECISIONS/0010_sync_control_message_interleaving.md).
+
+This correction supersedes the prior entry verdict operationally: the exact
+corrective candidate must pass local validation, review, CI, promotion, and a
+new four-node dry run before either the 30-minute or 48-hour clock can begin.

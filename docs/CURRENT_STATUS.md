@@ -284,3 +284,32 @@ runtime work requires explicit owner authorization. Each behavior change
 requires its own isolated commit, applicable focused and full validation,
 short-lived review branch, pull-request CI, promotion gate, and documentation
 closeout.
+
+## 2026-08-04 Internet Dry-Run Finding
+
+The first real Internet connectivity audit connected an exact-tree Linux node
+to the public seed successfully, but higher-work recovery remained at height 1.
+The seed was at height 3055 and continued mining. Recovery repeatedly failed
+with `unexpected block reply: AnnounceBlock`.
+
+Exact-source characterization found that catch-up sent `GetBlock` and required
+the very next message to be `Block`, even though the full-duplex session could
+legitimately deliver a block announcement first. This made recovery depend on
+network message arrival order.
+
+The isolated branch `fix/p2p-sync-interleaved-announcement`, based on
+`c141bb83cc307fedd6d73ee8fd86af6185799e5d`, contains a corrective candidate:
+
+- `b3e8331` deterministically reproduces the failure;
+- `0ba3c43` retains the outstanding block request while servicing supported
+  asynchronous control traffic;
+- `3890e19` covers announcement, ping, and height traffic before the requested
+  block.
+
+The candidate does not change protocol identity, message encoding, block
+acceptance, cumulative-work fork choice, proof of work, VisionX, persistence,
+state roots, APIs, or configuration. It is not promoted or released. It must
+complete the P2P/synchronization, watchdog, multi-node, VisionX, and locked
+release gates plus review and CI before any four-node clock begins. The
+decision is recorded in
+[ADR-0010](DECISIONS/0010_sync_control_message_interleaving.md).
