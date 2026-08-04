@@ -8,13 +8,17 @@ use tokio::sync::Mutex;
 
 use crate::chain::accept::{apply_block, AcceptResult};
 use crate::chain::state::ChainState;
-use crate::config::constants::{STALL_OVERRIDE_SECS, SYNC_CLEAR_JOB_MIN_LAG, SYNC_LAG_THRESHOLD};
+use crate::config::constants::{
+    STALL_OVERRIDE_SECS, SYNC_BLOCK_RESPONSE_TIMEOUT_SECS, SYNC_CLEAR_JOB_MIN_LAG,
+    SYNC_LAG_THRESHOLD, SYNC_PROGRESS_INTERVAL_BLOCKS,
+};
 use crate::mempool::Mempool;
 use crate::node::recovery::RecoveryState;
 use crate::p2p::connection::{recv_message, send_message, P2PConnectionManager};
 use crate::p2p::messages::P2PMessage;
 use crate::p2p::peer_manager::PeerManager;
 use crate::p2p::protocol::{validate_handshake, ChainSummary, HandshakeResult};
+use crate::types::Block;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncDecision {
@@ -117,8 +121,32 @@ pub(crate) async fn live_sync_from_peer(
     peer_addr: &str,
     mempool: Option<&Mempool>,
 ) -> Result<usize> {
+    live_sync_from_peer_with_timeout(
+        conn_mgr,
+        chain,
+        peer_manager,
+        peer_addr,
+        mempool,
+        Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
+    )
+    .await
+}
+
+async fn live_sync_from_peer_with_timeout(
+    conn_mgr: &P2PConnectionManager,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_manager: &PeerManager,
+    peer_addr: &str,
+    mempool: Option<&Mempool>,
+    block_response_timeout: Duration,
+) -> Result<usize> {
     let peer_socket: SocketAddr = peer_addr.parse()?;
     let mut stream = P2PConnectionManager::connect(peer_socket).await?;
+    tracing::info!(
+        "[SYNC] opened dedicated catch-up connection peer={} local_socket={:?}",
+        peer_addr,
+        stream.local_addr().ok()
+    );
     let local_nonce = conn_mgr.local_node_nonce();
     let local_height = chain.lock().await.current_height();
     let remote_height = peer_manager.best_remote_height();
@@ -180,6 +208,49 @@ pub(crate) async fn live_sync_from_peer(
         .ok_or_else(|| anyhow!("height query exceeded message limit for {}", peer_addr))?;
     peer_manager.note_peer_summary(peer_addr, remote_summary.clone(), false);
 
+    sync_branch_from_stream_with_timeout(
+        &mut stream,
+        chain,
+        peer_addr,
+        remote_summary,
+        mempool,
+        block_response_timeout,
+    )
+    .await
+}
+
+pub(crate) async fn sync_branch_from_stream<S>(
+    stream: &mut S,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: &str,
+    remote_summary: ChainSummary,
+    mempool: Option<&Mempool>,
+) -> Result<usize>
+where
+    S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
+{
+    sync_branch_from_stream_with_timeout(
+        stream,
+        chain,
+        peer_addr,
+        remote_summary,
+        mempool,
+        Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
+    )
+    .await
+}
+
+async fn sync_branch_from_stream_with_timeout<S>(
+    stream: &mut S,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: &str,
+    remote_summary: ChainSummary,
+    mempool: Option<&Mempool>,
+    block_response_timeout: Duration,
+) -> Result<usize>
+where
+    S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
+{
     let local_summary = {
         let g = chain.lock().await;
         ChainSummary::from_chain(&g)
@@ -210,6 +281,29 @@ pub(crate) async fn live_sync_from_peer(
         local_summary.cumulative_work,
         remote_work_ahead
     );
+    let fetched = fetch_missing_branch(
+        stream,
+        chain,
+        peer_addr,
+        &local_summary,
+        &remote_summary,
+        block_response_timeout,
+    )
+    .await?;
+    import_fetched_blocks(chain, mempool, peer_addr, fetched).await
+}
+
+async fn fetch_missing_branch<S>(
+    stream: &mut S,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: &str,
+    local_summary: &ChainSummary,
+    remote_summary: &ChainSummary,
+    block_response_timeout: Duration,
+) -> Result<Vec<Block>>
+where
+    S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
+{
     let mut current_hash = remote_summary.tip_hash.clone().ok_or_else(|| {
         anyhow!(
             "peer reported no tip hash at height {}",
@@ -218,6 +312,8 @@ pub(crate) async fn live_sync_from_peer(
     })?;
     let mut fetched = Vec::new();
     let mut seen = HashSet::new();
+    let fetch_started = Instant::now();
+    let mut last_progress_log = Instant::now();
 
     loop {
         let known = { chain.lock().await.block_by_hash(&current_hash).is_some() };
@@ -228,40 +324,14 @@ pub(crate) async fn live_sync_from_peer(
             return Err(anyhow!("sync loop detected at {}", current_hash));
         }
 
-        send_message(
-            &mut stream,
-            &P2PMessage::GetBlock {
-                hash: current_hash.clone(),
-            },
+        let block = request_block_with_timeout(
+            &mut *stream,
+            chain,
+            peer_addr,
+            &current_hash,
+            block_response_timeout,
         )
         .await?;
-        let block = loop {
-            match recv_message(&mut stream).await? {
-                P2PMessage::Block { block } => break block,
-                P2PMessage::AnnounceBlock(announcement) => {
-                    tracing::debug!(
-                        "[SYNC] deferred announcement height={} while awaiting block {} from {}",
-                        announcement.height,
-                        current_hash,
-                        peer_addr
-                    );
-                }
-                P2PMessage::GetHeight => {
-                    let summary = {
-                        let g = chain.lock().await;
-                        ChainSummary::from_chain(&g)
-                    };
-                    send_message(&mut stream, &P2PMessage::Height { summary }).await?;
-                }
-                P2PMessage::Ping { timestamp } => {
-                    send_message(&mut stream, &P2PMessage::Pong { timestamp }).await?;
-                }
-                P2PMessage::Disconnect { reason } => {
-                    return Err(anyhow!("peer rejected block request: {}", reason))
-                }
-                other => return Err(anyhow!("unexpected block reply: {}", other.label())),
-            }
-        };
 
         if block.hash() != current_hash {
             return Err(anyhow!(
@@ -273,7 +343,24 @@ pub(crate) async fn live_sync_from_peer(
 
         let parent_hash = block.header.parent_hash.clone();
         let is_genesis = block.header.number == 0;
+        let fetched_height = block.header.number;
         fetched.push(block);
+        let downloaded = fetched.len();
+        if downloaded == 1
+            || downloaded % SYNC_PROGRESS_INTERVAL_BLOCKS == 0
+            || last_progress_log.elapsed() >= Duration::from_secs(10)
+        {
+            tracing::info!(
+                "[SYNC] branch download progress peer={} downloaded={} walk_height={} target_height={} local_height={} elapsed_secs={}",
+                peer_addr,
+                downloaded,
+                fetched_height,
+                remote_summary.height,
+                local_summary.height,
+                fetch_started.elapsed().as_secs()
+            );
+            last_progress_log = Instant::now();
+        }
         if is_genesis {
             break;
         }
@@ -293,7 +380,65 @@ pub(crate) async fn live_sync_from_peer(
     } else {
         tracing::info!("[SYNC] received 0 blocks from {}", peer_addr);
     }
-    import_fetched_blocks(chain, mempool, peer_addr, fetched).await
+    Ok(fetched)
+}
+
+async fn request_block_with_timeout<S>(
+    stream: &mut S,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: &str,
+    requested_hash: &str,
+    response_timeout: Duration,
+) -> Result<Block>
+where
+    S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
+{
+    let request = async {
+        send_message(
+            &mut *stream,
+            &P2PMessage::GetBlock {
+                hash: requested_hash.to_string(),
+            },
+        )
+        .await?;
+        loop {
+            match recv_message(&mut *stream).await? {
+                P2PMessage::Block { block } => return Ok(block),
+                P2PMessage::AnnounceBlock(announcement) => {
+                    tracing::debug!(
+                        "[SYNC] deferred announcement height={} while awaiting block {} from {}",
+                        announcement.height,
+                        requested_hash,
+                        peer_addr
+                    );
+                }
+                P2PMessage::GetHeight => {
+                    let summary = {
+                        let g = chain.lock().await;
+                        ChainSummary::from_chain(&g)
+                    };
+                    send_message(&mut *stream, &P2PMessage::Height { summary }).await?;
+                }
+                P2PMessage::Ping { timestamp } => {
+                    send_message(&mut *stream, &P2PMessage::Pong { timestamp }).await?;
+                }
+                P2PMessage::Disconnect { reason } => {
+                    return Err(anyhow!("peer rejected block request: {}", reason));
+                }
+                other => return Err(anyhow!("unexpected block reply: {}", other.label())),
+            }
+        }
+    };
+
+    match tokio::time::timeout(response_timeout, request).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!(
+            "block response timeout peer={} hash={} timeout_secs={}",
+            peer_addr,
+            requested_hash,
+            response_timeout.as_secs_f64()
+        )),
+    }
 }
 
 async fn import_fetched_blocks(
@@ -302,8 +447,9 @@ async fn import_fetched_blocks(
     peer_addr: &str,
     fetched: Vec<crate::types::Block>,
 ) -> Result<usize> {
+    let total = fetched.len();
     let mut imported = 0usize;
-    for block in fetched {
+    for (index, block) in fetched.into_iter().enumerate() {
         let block_hash = block.hash().to_string();
         let result = {
             let mut g = chain.lock().await;
@@ -354,6 +500,17 @@ async fn import_fetched_blocks(
             AcceptResult::Rejected(reason) => {
                 return Err(anyhow!("sync import rejected: {}", reason));
             }
+        }
+        let processed = index + 1;
+        if processed % SYNC_PROGRESS_INTERVAL_BLOCKS == 0 || processed == total {
+            tracing::info!(
+                "[SYNC] branch import progress peer={} processed={} total={} imported={} block_height={}",
+                peer_addr,
+                processed,
+                total,
+                imported,
+                block.header.number
+            );
         }
     }
 
@@ -476,7 +633,7 @@ mod tests {
     use crate::genesis::genesis_block;
     use crate::p2p::peer_manager::PeerState;
     use crate::p2p::protocol::{AnnounceBlock, HandshakeMessage};
-    use crate::types::Block;
+    use crate::types::{Block, BlockHeader};
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};
@@ -537,6 +694,34 @@ mod tests {
         blocks
     }
 
+    fn build_transport_blocks(total_height: u64) -> Vec<Block> {
+        assert!(total_height >= 1);
+        let mut blocks = build_blocks(1, None);
+        let mut parent_hash = blocks[0].hash().to_string();
+        let mut timestamp = blocks[0].header.timestamp;
+        for height in 2..=total_height {
+            timestamp += TARGET_BLOCK_TIME;
+            let block = Block {
+                header: BlockHeader {
+                    parent_hash,
+                    number: height,
+                    timestamp,
+                    difficulty: DIFFICULTY_FLOOR,
+                    nonce: height,
+                    pow_hash: format!("{height:064x}"),
+                    state_root: "0".repeat(64),
+                    tx_root: "0".repeat(64),
+                    miner: "0".repeat(64),
+                },
+                txs: Vec::new(),
+                weight: 0,
+            };
+            parent_hash = block.hash().to_string();
+            blocks.push(block);
+        }
+        blocks
+    }
+
     fn summary_for_blocks(blocks: &[Block], advertised_work: Option<u128>) -> ChainSummary {
         let height = blocks.last().map(|b| b.header.number).unwrap_or(0);
         let tip_hash = blocks.last().map(|b| b.hash().to_string());
@@ -554,6 +739,7 @@ mod tests {
         Specific(Block),
         MalformedFrame,
         Disconnect,
+        Withhold,
     }
     async fn spawn_scripted_peer(
         blocks: Vec<Block>,
@@ -657,6 +843,13 @@ mod tests {
                             BlockReply::Disconnect => {
                                 break;
                             }
+                            BlockReply::Withhold => match recv_message(&mut stream).await {
+                                Ok(P2PMessage::Disconnect { .. }) | Err(_) => break,
+                                Ok(other) => panic!(
+                                    "expected client disconnect after withheld block, got {:?}",
+                                    other
+                                ),
+                            },
                         }
                     }
                     Ok(P2PMessage::Disconnect { .. }) | Err(_) => break,
@@ -924,6 +1117,95 @@ mod tests {
         assert_eq!(g.current_height(), 6);
         assert_eq!(g.tip_hash(), remote_blocks.last().unwrap().hash());
         drop(g);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn branch_sync_reuses_established_seed_session() {
+        let remote_blocks = build_blocks(6, None);
+        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let conn_mgr =
+            P2PConnectionManager::new("127.0.0.1:19116".parse().unwrap(), chain.clone(), pm);
+        let peer = peer_addr.to_string();
+        let mut stream = P2PConnectionManager::connect(peer_addr).await.unwrap();
+        let local_height = chain.lock().await.current_height();
+        send_message(
+            &mut stream,
+            &P2PMessage::Handshake(conn_mgr.local_handshake(local_height)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            recv_message(&mut stream).await.unwrap(),
+            P2PMessage::Handshake(_)
+        ));
+        send_message(&mut stream, &P2PMessage::GetHeight)
+            .await
+            .unwrap();
+        let remote_summary = match recv_message(&mut stream).await.unwrap() {
+            P2PMessage::Height { summary } => summary,
+            other => panic!("expected height summary, got {:?}", other),
+        };
+
+        let imported = sync_branch_from_stream(&mut stream, &chain, &peer, remote_summary, None)
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 5);
+        let chain = chain.lock().await;
+        assert_eq!(chain.current_height(), 6);
+        assert_eq!(chain.tip_hash(), remote_blocks.last().unwrap().hash());
+        drop(chain);
+        drop(stream);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_sync_times_out_when_peer_withholds_requested_block() {
+        let remote_blocks = build_blocks(6, None);
+        let (peer_addr, peer_task) =
+            spawn_scripted_peer(remote_blocks.clone(), vec![BlockReply::Withhold]).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let initial_tip = local_chain.tip_hash();
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        pm.upsert(&peer, true);
+        pm.set_state(&peer, PeerState::Connected);
+        pm.note_peer_height(&peer, 6, false);
+
+        let conn_mgr = P2PConnectionManager::new(
+            "127.0.0.1:19114".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        );
+        let result = timeout(
+            Duration::from_secs(2),
+            live_sync_from_peer_with_timeout(
+                &conn_mgr,
+                &chain,
+                pm.as_ref(),
+                &peer,
+                None,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert!(result.to_string().contains("block response timeout"));
+        let chain = chain.lock().await;
+        assert_eq!(chain.current_height(), 1);
+        assert_eq!(chain.tip_hash(), initial_tip);
+        drop(chain);
 
         peer_task.await.unwrap();
     }
@@ -1458,6 +1740,63 @@ mod tests {
             })
             .collect();
         assert_eq!(requested_heights, vec![84, 83, 82]);
+
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn branch_download_handles_node_d_sized_gap() {
+        const REMOTE_HEIGHT: u64 = 3_400;
+        let remote_blocks = build_transport_blocks(REMOTE_HEIGHT);
+        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
+
+        let local_chain = seeded_chain(&remote_blocks);
+        let chain = Arc::new(Mutex::new(local_chain));
+        let pm = Arc::new(PeerManager::new());
+        let peer = peer_addr.to_string();
+        let conn_mgr =
+            P2PConnectionManager::new("127.0.0.1:19115".parse().unwrap(), chain.clone(), pm);
+        let mut stream = P2PConnectionManager::connect(peer_addr).await.unwrap();
+        let local_summary = {
+            let chain = chain.lock().await;
+            ChainSummary::from_chain(&chain)
+        };
+        send_message(
+            &mut stream,
+            &P2PMessage::Handshake(conn_mgr.local_handshake(local_summary.height)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            recv_message(&mut stream).await.unwrap(),
+            P2PMessage::Handshake(_)
+        ));
+        send_message(&mut stream, &P2PMessage::GetHeight)
+            .await
+            .unwrap();
+        let remote_summary = match recv_message(&mut stream).await.unwrap() {
+            P2PMessage::Height { summary } => summary,
+            other => panic!("expected height summary, got {:?}", other),
+        };
+        let fetched = timeout(
+            Duration::from_secs(30),
+            fetch_missing_branch(
+                &mut stream,
+                &chain,
+                &peer,
+                &local_summary,
+                &remote_summary,
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("Node D-scale branch download exceeded test deadline")
+        .unwrap();
+
+        assert_eq!(fetched.len(), REMOTE_HEIGHT as usize - 1);
+        assert_eq!(fetched.first().unwrap().header.number, 2);
+        assert_eq!(fetched.last().unwrap().header.number, REMOTE_HEIGHT);
+        drop(stream);
 
         peer_task.await.unwrap();
     }

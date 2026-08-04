@@ -593,18 +593,27 @@ async fn seed_peer_loop(
                             lag,
                             remote_has_more_work
                         );
-                        if sync_guard.is_blocked() {
+                        if requested_block_hash.is_some() {
+                            tracing::debug!(
+                                "[SYNC] {} catch-up deferred until announced-block request completes",
+                                peer_addr
+                            );
+                        } else if sync_guard.is_blocked() {
                             tracing::trace!(
                                 "[SYNC] {} catch-up skipped (sync in progress or throttled)",
                                 peer_addr
                             );
                         } else {
                             sync_guard.mark_started();
-                            let result = crate::p2p::sync::live_sync_from_peer(
-                                &conn_mgr,
+                            tracing::info!(
+                                "[SYNC] using persistent seed session for catch-up peer={}",
+                                peer_addr
+                            );
+                            let result = crate::p2p::sync::sync_branch_from_stream(
+                                &mut stream,
                                 &chain,
-                                &peer_manager,
                                 &peer_addr,
+                                remote_summary.clone(),
                                 Some(mempool.as_ref()),
                             )
                             .await;

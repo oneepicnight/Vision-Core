@@ -209,6 +209,17 @@ pub const SYNC_FORK_TIMEOUT_SECS: u64 = 10;
 /// (≤ 2 blocks). Avoids a 30 s wait for a gap that will resolve quickly.
 pub const SYNC_SHORT_BATCH_TIMEOUT_SECS: u64 = 5;
 
+/// [POLICY] Maximum time to wait for the requested block while walking a
+/// remote branch. The deadline covers interleaved control traffic as well as
+/// an otherwise silent peer, so one half-open session cannot hold the sync
+/// guard forever.
+pub const SYNC_BLOCK_RESPONSE_TIMEOUT_SECS: u64 = 30;
+
+/// [POLICY] Emit operator-visible branch download and import progress after
+/// this many blocks. The sync protocol walks parent hashes from the remote tip
+/// before it can safely import the branch in forward order.
+pub const SYNC_PROGRESS_INTERVAL_BLOCKS: usize = 100;
+
 /// [POLICY] How long (seconds) to hold the "syncing" gate open after a stall
 /// is detected. Must cover the full stall cooldown plus a safety buffer.
 pub const STALL_OVERRIDE_SECS: u64 = 120;
