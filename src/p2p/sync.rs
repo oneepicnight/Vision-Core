@@ -1788,7 +1788,7 @@ mod tests {
                 &peer,
                 &local_summary,
                 &remote_summary,
-                Duration::from_secs(1),
+                Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
             ),
         )
         .await
