@@ -1748,9 +1748,7 @@ mod tests {
     async fn branch_download_handles_node_d_sized_gap() {
         const REMOTE_HEIGHT: u64 = 3_400;
         let remote_blocks = build_transport_blocks(REMOTE_HEIGHT);
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let (peer_addr, peer_task) =
-            spawn_recording_peer(remote_blocks.clone(), requests.clone()).await;
+        let (peer_addr, peer_task) = spawn_mock_peer(remote_blocks.clone()).await;
 
         let local_chain = seeded_chain(&remote_blocks);
         let chain = Arc::new(Mutex::new(local_chain));
@@ -1780,31 +1778,34 @@ mod tests {
             P2PMessage::Height { summary } => summary,
             other => panic!("expected height summary, got {:?}", other),
         };
-        let fetched = match timeout(
-            Duration::from_secs(120),
-            fetch_missing_branch(
-                &mut stream,
-                &chain,
-                &peer,
-                &local_summary,
-                &remote_summary,
-                Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
-            ),
+        let started = std::time::Instant::now();
+        let fetched = fetch_missing_branch(
+            &mut stream,
+            &chain,
+            &peer,
+            &local_summary,
+            &remote_summary,
+            Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
         )
         .await
-        {
-            Ok(result) => result.unwrap(),
-            Err(_) => {
-                let downloaded = requests.lock().await.len();
-                panic!(
-                    "Node D-scale branch download exceeded test deadline after downloading {downloaded} blocks"
-                );
-            }
-        };
+        .unwrap();
+        let elapsed = started.elapsed();
 
         assert_eq!(fetched.len(), REMOTE_HEIGHT as usize - 1);
-        assert_eq!(fetched.first().unwrap().header.number, 2);
-        assert_eq!(fetched.last().unwrap().header.number, REMOTE_HEIGHT);
+        for (index, block) in fetched.iter().enumerate() {
+            assert_eq!(block.header.number, index as u64 + 2);
+            let expected_parent = if index == 0 {
+                remote_blocks[0].hash()
+            } else {
+                fetched[index - 1].hash()
+            };
+            assert_eq!(block.header.parent_hash, expected_parent);
+        }
+        println!(
+            "Node D-scale branch downloaded {} blocks in {:.3} seconds",
+            fetched.len(),
+            elapsed.as_secs_f64()
+        );
         drop(stream);
 
         peer_task.await.unwrap();
