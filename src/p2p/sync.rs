@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -71,40 +72,143 @@ pub fn should_sync_for_summary(peer_manager: &PeerManager, local: &ChainSummary)
 
     SyncDecision::Synced
 }
+#[derive(Debug, Clone)]
 pub struct SyncGuard {
+    state: Arc<StdMutex<SyncGuardState>>,
+}
+
+#[derive(Debug)]
+struct SyncGuardState {
     in_progress: bool,
     cooldown_until: Option<Instant>,
+    generation: u64,
+    owner: Option<SyncOwner>,
+}
+
+#[derive(Debug, Clone)]
+struct SyncOwner {
+    source: String,
+    peer: String,
+    generation: u64,
+}
+
+#[derive(Debug)]
+pub struct SyncLease {
+    guard: SyncGuard,
+    owner: SyncOwner,
+    outcome: &'static str,
 }
 
 impl SyncGuard {
     pub fn new() -> Self {
         Self {
-            in_progress: false,
-            cooldown_until: None,
+            state: Arc::new(StdMutex::new(SyncGuardState {
+                in_progress: false,
+                cooldown_until: None,
+                generation: 0,
+                owner: None,
+            })),
         }
     }
     pub fn is_in_progress(&self) -> bool {
-        self.in_progress
+        self.state
+            .lock()
+            .expect("sync coordinator poisoned")
+            .in_progress
     }
     pub fn is_throttled(&self) -> bool {
-        self.cooldown_until
+        self.state
+            .lock()
+            .expect("sync coordinator poisoned")
+            .cooldown_until
             .map(|t| Instant::now() < t)
             .unwrap_or(false)
     }
     pub fn is_blocked(&self) -> bool {
         self.is_in_progress() || self.is_throttled()
     }
-    pub fn mark_started(&mut self) {
-        self.in_progress = true;
-    }
-    pub fn mark_done(&mut self) {
-        self.in_progress = false;
-        self.cooldown_until = Some(Instant::now() + Duration::from_secs(STALL_OVERRIDE_SECS));
+    pub fn try_acquire(
+        &self,
+        source: impl Into<String>,
+        peer: impl Into<String>,
+    ) -> Option<SyncLease> {
+        let source = source.into();
+        let peer = peer.into();
+        let mut state = self.state.lock().expect("sync coordinator poisoned");
+        if state.in_progress
+            || state
+                .cooldown_until
+                .map(|until| Instant::now() < until)
+                .unwrap_or(false)
+        {
+            let owner = state.owner.as_ref();
+            tracing::info!(
+                "[SYNC_LEASE] skipped source={} peer={} owner_source={} owner_peer={} generation={}",
+                source,
+                peer,
+                owner.map(|owner| owner.source.as_str()).unwrap_or("none"),
+                owner.map(|owner| owner.peer.as_str()).unwrap_or("none"),
+                owner.map(|owner| owner.generation).unwrap_or(state.generation)
+            );
+            return None;
+        }
+        state.generation = state.generation.wrapping_add(1);
+        let owner = SyncOwner {
+            source,
+            peer,
+            generation: state.generation,
+        };
+        state.in_progress = true;
+        state.owner = Some(owner.clone());
+        tracing::info!(
+            "[SYNC_LEASE] acquired source={} peer={} generation={}",
+            owner.source,
+            owner.peer,
+            owner.generation
+        );
+        Some(SyncLease {
+            guard: self.clone(),
+            owner,
+            outcome: "cancelled",
+        })
     }
     #[cfg(test)]
-    pub fn reset(&mut self) {
-        self.in_progress = false;
-        self.cooldown_until = None;
+    pub fn reset(&self) {
+        let mut state = self.state.lock().expect("sync coordinator poisoned");
+        state.in_progress = false;
+        state.cooldown_until = None;
+        state.owner = None;
+    }
+}
+
+impl SyncLease {
+    pub fn complete(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+        tracing::info!(
+            "[SYNC_LEASE] completed source={} peer={} generation={} outcome={}",
+            self.owner.source,
+            self.owner.peer,
+            self.owner.generation,
+            outcome
+        );
+    }
+}
+
+impl Drop for SyncLease {
+    fn drop(&mut self) {
+        let mut state = self.guard.state.lock().expect("sync coordinator poisoned");
+        if state.owner.as_ref().map(|owner| owner.generation) == Some(self.owner.generation) {
+            state.in_progress = false;
+            state.owner = None;
+            state.cooldown_until = Some(Instant::now() + Duration::from_secs(STALL_OVERRIDE_SECS));
+        }
+        tracing::info!(
+            "[SYNC_LEASE] released source={} peer={} generation={} outcome={}",
+            self.owner.source,
+            self.owner.peer,
+            self.owner.generation,
+            self.outcome
+        );
     }
 }
 
@@ -214,6 +318,7 @@ async fn live_sync_from_peer_with_timeout(
         peer_addr,
         remote_summary,
         mempool,
+        Some(peer_manager),
         block_response_timeout,
     )
     .await
@@ -225,6 +330,7 @@ pub(crate) async fn sync_branch_from_stream<S>(
     peer_addr: &str,
     remote_summary: ChainSummary,
     mempool: Option<&Mempool>,
+    peer_manager: Option<&PeerManager>,
 ) -> Result<usize>
 where
     S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
@@ -235,6 +341,7 @@ where
         peer_addr,
         remote_summary,
         mempool,
+        peer_manager,
         Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
     )
     .await
@@ -246,6 +353,7 @@ async fn sync_branch_from_stream_with_timeout<S>(
     peer_addr: &str,
     remote_summary: ChainSummary,
     mempool: Option<&Mempool>,
+    peer_manager: Option<&PeerManager>,
     block_response_timeout: Duration,
 ) -> Result<usize>
 where
@@ -287,6 +395,7 @@ where
         peer_addr,
         &local_summary,
         &remote_summary,
+        peer_manager,
         block_response_timeout,
     )
     .await?;
@@ -299,6 +408,7 @@ async fn fetch_missing_branch<S>(
     peer_addr: &str,
     local_summary: &ChainSummary,
     remote_summary: &ChainSummary,
+    peer_manager: Option<&PeerManager>,
     block_response_timeout: Duration,
 ) -> Result<Vec<Block>>
 where
@@ -329,6 +439,7 @@ where
             chain,
             peer_addr,
             &current_hash,
+            peer_manager,
             block_response_timeout,
         )
         .await?;
@@ -388,6 +499,7 @@ async fn request_block_with_timeout<S>(
     chain: &Arc<Mutex<ChainState>>,
     peer_addr: &str,
     requested_hash: &str,
+    peer_manager: Option<&PeerManager>,
     response_timeout: Duration,
 ) -> Result<Block>
 where
@@ -405,8 +517,11 @@ where
             match recv_message(&mut *stream).await? {
                 P2PMessage::Block { block } => return Ok(block),
                 P2PMessage::AnnounceBlock(announcement) => {
+                    if let Some(peer_manager) = peer_manager {
+                        peer_manager.note_peer_height(peer_addr, announcement.height, true);
+                    }
                     tracing::debug!(
-                        "[SYNC] deferred announcement height={} while awaiting block {} from {}",
+                        "[SYNC] peer-tip update height={} deferred during branch walk awaiting_block={} peer={}",
                         announcement.height,
                         requested_hash,
                         peer_addr
@@ -557,10 +672,12 @@ pub async fn watchdog_step(
             if lag >= SYNC_CLEAR_JOB_MIN_LAG {
                 tracing::info!("[SYNC] clearing miner job (lag={})", lag);
             }
-            guard.mark_started();
+            let Some(mut lease) = guard.try_acquire("watchdog", peer_addr.clone()) else {
+                return Ok(());
+            };
             let result =
                 live_sync_from_peer(conn_mgr, chain, peer_manager, &peer_addr, mempool).await;
-            guard.mark_done();
+            lease.complete(if result.is_ok() { "success" } else { "error" });
             result?;
         }
         SyncDecision::HigherWork {
@@ -585,10 +702,12 @@ pub async fn watchdog_step(
                     remote_summary,
                 );
             }
-            guard.mark_started();
+            let Some(mut lease) = guard.try_acquire("watchdog", peer_addr.clone()) else {
+                return Ok(());
+            };
             let result =
                 live_sync_from_peer(conn_mgr, chain, peer_manager, &peer_addr, mempool).await;
-            guard.mark_done();
+            lease.complete(if result.is_ok() { "success" } else { "error" });
             match result {
                 Ok(_) => {
                     if let Some(recovery_state) = recovery_state {
@@ -933,6 +1052,85 @@ mod tests {
         (addr, handle)
     }
 
+    async fn spawn_moving_tip_recording_peer(
+        blocks: Vec<Block>,
+        requests: Arc<Mutex<Vec<String>>>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let server_nonce = 0xA11CE_u64;
+            let client_hs = match recv_message(&mut stream).await.unwrap() {
+                P2PMessage::Handshake(hs) => hs,
+                other => panic!("expected handshake, got {:?}", other),
+            };
+            assert_eq!(
+                validate_handshake(&client_hs, server_nonce),
+                HandshakeResult::Accepted
+            );
+            let summary = summary_for_blocks(&blocks, None);
+            send_message(
+                &mut stream,
+                &P2PMessage::Handshake(HandshakeMessage::new(summary.height, server_nonce)),
+            )
+            .await
+            .unwrap();
+
+            let by_hash: HashMap<String, Block> = blocks
+                .into_iter()
+                .map(|block| (block.hash().to_string(), block))
+                .collect();
+            loop {
+                match recv_message(&mut stream).await {
+                    Ok(P2PMessage::GetHeight) => {
+                        send_message(
+                            &mut stream,
+                            &P2PMessage::Height {
+                                summary: summary.clone(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Ok(P2PMessage::GetBlock { hash }) => {
+                        let mut recorded = requests.lock().await;
+                        recorded.push(hash.clone());
+                        let request_number = recorded.len();
+                        drop(recorded);
+                        if request_number % 100 == 0 {
+                            send_message(
+                                &mut stream,
+                                &P2PMessage::AnnounceBlock(AnnounceBlock {
+                                    hash: format!(
+                                        "{:064x}",
+                                        summary.height + request_number as u64
+                                    ),
+                                    height: summary.height + request_number as u64,
+                                    prev: summary
+                                        .tip_hash
+                                        .clone()
+                                        .unwrap_or_else(|| "0".repeat(64)),
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        let Some(block) = by_hash.get(&hash).cloned() else {
+                            break;
+                        };
+                        send_message(&mut stream, &P2PMessage::Block { block })
+                            .await
+                            .unwrap();
+                    }
+                    Ok(P2PMessage::Disconnect { .. }) | Err(_) => break,
+                    Ok(other) => panic!("unexpected message {:?}", other),
+                }
+            }
+        });
+        (addr, handle)
+    }
+
     fn seeded_chain(blocks: &[Block]) -> ChainState {
         let mut local_chain = temp_state();
         let gen = genesis_block();
@@ -981,9 +1179,81 @@ mod tests {
 
     #[test]
     fn guard_blocks_while_in_progress() {
-        let mut g = SyncGuard::new();
-        g.mark_started();
+        let g = SyncGuard::new();
+        let _lease = g
+            .try_acquire("test", "peer-a")
+            .expect("first sync lease should be acquired");
         assert!(g.is_blocked());
+    }
+
+    #[test]
+    fn simultaneous_watchdog_and_seed_trigger_produces_one_lease() {
+        let coordinator = SyncGuard::new();
+        let watchdog = coordinator.clone();
+        let seed = coordinator.clone();
+
+        let _lease = watchdog
+            .try_acquire("watchdog", "peer-a")
+            .expect("watchdog should acquire the node-wide lease");
+        assert!(seed.try_acquire("seed-session", "peer-a").is_none());
+    }
+
+    #[test]
+    fn multiple_seed_sessions_cannot_overlap() {
+        let coordinator = SyncGuard::new();
+        let first_seed = coordinator.clone();
+        let second_seed = coordinator.clone();
+
+        let _lease = first_seed
+            .try_acquire("seed-session", "peer-a")
+            .expect("first seed should acquire the node-wide lease");
+        assert!(second_seed.try_acquire("seed-session", "peer-b").is_none());
+    }
+
+    #[test]
+    fn dropped_lease_releases_ownership_for_later_attempt() {
+        let coordinator = SyncGuard::new();
+        {
+            let _lease = coordinator
+                .try_acquire("seed-session", "peer-a")
+                .expect("initial attempt should acquire the lease");
+            assert!(coordinator.is_in_progress());
+        }
+
+        assert!(!coordinator.is_in_progress());
+        coordinator.reset();
+        assert!(coordinator.try_acquire("watchdog", "peer-b").is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_sync_task_releases_lease() {
+        let coordinator = SyncGuard::new();
+        let task_coordinator = coordinator.clone();
+        let task = tokio::spawn(async move {
+            let _lease = task_coordinator
+                .try_acquire("seed-session", "peer-a")
+                .expect("task should acquire the lease");
+            std::future::pending::<()>().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(coordinator.is_in_progress());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!coordinator.is_in_progress());
+    }
+
+    #[test]
+    fn import_scope_remains_single_flight() {
+        let coordinator = SyncGuard::new();
+        let mut lease = coordinator
+            .try_acquire("seed-session", "peer-a")
+            .expect("branch download should acquire the lease");
+
+        assert!(coordinator.try_acquire("watchdog", "peer-b").is_none());
+        lease.complete("success");
+        drop(lease);
+        assert!(!coordinator.is_in_progress());
     }
 
     #[tokio::test]
@@ -1129,8 +1399,11 @@ mod tests {
         let local_chain = seeded_chain(&remote_blocks);
         let chain = Arc::new(Mutex::new(local_chain));
         let pm = Arc::new(PeerManager::new());
-        let conn_mgr =
-            P2PConnectionManager::new("127.0.0.1:19116".parse().unwrap(), chain.clone(), pm);
+        let conn_mgr = P2PConnectionManager::new(
+            "127.0.0.1:19116".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        );
         let peer = peer_addr.to_string();
         let mut stream = P2PConnectionManager::connect(peer_addr).await.unwrap();
         let local_height = chain.lock().await.current_height();
@@ -1152,9 +1425,16 @@ mod tests {
             other => panic!("expected height summary, got {:?}", other),
         };
 
-        let imported = sync_branch_from_stream(&mut stream, &chain, &peer, remote_summary, None)
-            .await
-            .unwrap();
+        let imported = sync_branch_from_stream(
+            &mut stream,
+            &chain,
+            &peer,
+            remote_summary,
+            None,
+            Some(pm.as_ref()),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(imported, 5);
         let chain = chain.lock().await;
@@ -1785,6 +2065,7 @@ mod tests {
             &peer,
             &local_summary,
             &remote_summary,
+            None,
             Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
         )
         .await
@@ -1808,6 +2089,81 @@ mod tests {
         );
         drop(stream);
 
+        peer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn moving_tip_announcements_do_not_duplicate_large_branch_requests() {
+        const REMOTE_HEIGHT: u64 = 4_000;
+        let remote_blocks = build_transport_blocks(REMOTE_HEIGHT);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (peer_addr, peer_task) =
+            spawn_moving_tip_recording_peer(remote_blocks.clone(), requests.clone()).await;
+        let chain = Arc::new(Mutex::new(seeded_chain(&remote_blocks)));
+        let pm = Arc::new(PeerManager::new());
+        pm.upsert(&peer_addr.to_string(), true);
+        pm.set_state(&peer_addr.to_string(), PeerState::Connected);
+        let conn_mgr = P2PConnectionManager::new(
+            "127.0.0.1:19116".parse().unwrap(),
+            chain.clone(),
+            pm.clone(),
+        );
+        let mut stream = P2PConnectionManager::connect(peer_addr).await.unwrap();
+        let local_summary = {
+            let chain = chain.lock().await;
+            ChainSummary::from_chain(&chain)
+        };
+        send_message(
+            &mut stream,
+            &P2PMessage::Handshake(conn_mgr.local_handshake(local_summary.height)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            recv_message(&mut stream).await.unwrap(),
+            P2PMessage::Handshake(_)
+        ));
+        send_message(&mut stream, &P2PMessage::GetHeight)
+            .await
+            .unwrap();
+        let remote_summary = match recv_message(&mut stream).await.unwrap() {
+            P2PMessage::Height { summary } => summary,
+            other => panic!("expected height summary, got {:?}", other),
+        };
+
+        let coordinator = SyncGuard::new();
+        let mut lease = coordinator
+            .try_acquire("seed-session", peer_addr.to_string())
+            .expect("seed session should acquire the node-wide lease");
+        let fetched = fetch_missing_branch(
+            &mut stream,
+            &chain,
+            &peer_addr.to_string(),
+            &local_summary,
+            &remote_summary,
+            Some(pm.as_ref()),
+            Duration::from_secs(SYNC_BLOCK_RESPONSE_TIMEOUT_SECS),
+        )
+        .await
+        .unwrap();
+        assert!(coordinator
+            .try_acquire("watchdog", peer_addr.to_string())
+            .is_none());
+        lease.complete("success");
+        drop(lease);
+
+        assert_eq!(fetched.len(), REMOTE_HEIGHT as usize - 1);
+        assert!(pm.best_remote_height() > REMOTE_HEIGHT);
+        let requested = requests.lock().await;
+        assert_eq!(requested.len(), REMOTE_HEIGHT as usize - 1);
+        let unique: HashSet<&String> = requested.iter().collect();
+        assert_eq!(
+            unique.len(),
+            requested.len(),
+            "duplicate block request found"
+        );
+        drop(requested);
+        drop(stream);
         peer_task.await.unwrap();
     }
 }

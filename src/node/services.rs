@@ -80,6 +80,7 @@ pub async fn start_services(
     let p2p_addr: SocketAddr = settings.p2p_addr.parse()?;
     let (inbound_block_sender, inbound_block_receiver) = mpsc::channel(64);
     let (discovered_peer_sender, discovered_peer_receiver) = mpsc::channel(128);
+    let sync_guard = SyncGuard::new();
     let conn_mgr = Arc::new(
         P2PConnectionManager::new_with_advertised(
             p2p_addr,
@@ -130,6 +131,7 @@ pub async fn start_services(
         let recovery_ref = recovery_state.clone();
         let discovery_sender_ref = discovered_peer_sender.clone();
         let allow_private = settings.allow_private_peer_addresses;
+        let sync_guard_ref = sync_guard.clone();
         tokio::spawn(async move {
             peer_dial_supervisor(
                 discovered_peer_receiver,
@@ -139,6 +141,7 @@ pub async fn start_services(
                 conn_mgr_ref,
                 mempool_ref,
                 recovery_ref,
+                sync_guard_ref,
                 allow_private,
             )
             .await;
@@ -156,16 +159,16 @@ pub async fn start_services(
         let chain_ref = chain.clone();
         let mempool_ref = mempool.clone();
         let recovery_ref = recovery_state.clone();
+        let mut sync_guard_ref = sync_guard.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(20));
-            let mut sync_guard = crate::p2p::sync::SyncGuard::new();
             loop {
                 interval.tick().await;
                 if let Err(e) = crate::p2p::sync::watchdog_step(
                     &mgr,
                     &chain_ref,
                     &pm,
-                    &mut sync_guard,
+                    &mut sync_guard_ref,
                     Some(mempool_ref.as_ref()),
                     Some(recovery_ref.as_ref()),
                 )
@@ -296,6 +299,7 @@ async fn peer_dial_supervisor(
     conn_mgr: Arc<P2PConnectionManager>,
     mempool: Arc<Mempool>,
     recovery_state: Arc<RecoveryState>,
+    sync_guard: SyncGuard,
     allow_private: bool,
 ) {
     let mut scheduled = HashSet::new();
@@ -332,6 +336,7 @@ async fn peer_dial_supervisor(
         let mempool_ref = mempool.clone();
         let recovery_ref = recovery_state.clone();
         let discovery_sender_ref = discovered_peer_sender.clone();
+        let sync_guard_ref = sync_guard.clone();
         tokio::spawn(async move {
             seed_peer_loop(
                 chain_ref,
@@ -341,6 +346,7 @@ async fn peer_dial_supervisor(
                 peer_addr,
                 recovery_ref,
                 discovery_sender_ref,
+                sync_guard_ref,
             )
             .await;
         });
@@ -429,11 +435,10 @@ async fn seed_peer_loop(
     peer_addr: String,
     recovery_state: Arc<RecoveryState>,
     discovered_peer_sender: mpsc::Sender<String>,
+    sync_guard: SyncGuard,
 ) {
     let reconnect_delay = Duration::from_secs(2);
     let heartbeat_delay = Duration::from_secs(5);
-    let mut sync_guard = SyncGuard::new();
-
     let peer_socket: SocketAddr = match peer_addr.parse() {
         Ok(addr) => addr,
         Err(e) => {
@@ -598,13 +603,17 @@ async fn seed_peer_loop(
                                 "[SYNC] {} catch-up deferred until announced-block request completes",
                                 peer_addr
                             );
-                        } else if sync_guard.is_blocked() {
-                            tracing::trace!(
-                                "[SYNC] {} catch-up skipped (sync in progress or throttled)",
-                                peer_addr
-                            );
                         } else {
-                            sync_guard.mark_started();
+                            let Some(mut lease) =
+                                sync_guard.try_acquire("seed-session", peer_addr.clone())
+                            else {
+                                tracing::trace!(
+                                    "[SYNC] {} catch-up skipped (node-wide sync lease unavailable)",
+                                    peer_addr
+                                );
+                                tokio::time::sleep(heartbeat_delay).await;
+                                continue;
+                            };
                             tracing::info!(
                                 "[SYNC] using persistent seed session for catch-up peer={}",
                                 peer_addr
@@ -615,9 +624,10 @@ async fn seed_peer_loop(
                                 &peer_addr,
                                 remote_summary.clone(),
                                 Some(mempool.as_ref()),
+                                Some(peer_manager.as_ref()),
                             )
                             .await;
-                            sync_guard.mark_done();
+                            lease.complete(if result.is_ok() { "success" } else { "error" });
                             match result {
                                 Ok(_) if remote_has_more_work => {
                                     let after = {
